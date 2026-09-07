@@ -144,8 +144,7 @@ class LitterDevice(LogsMixin, Device):
             "alarm_status": self.detail.get("alarmStatus"),
             "weight": self.detail.get("weight"),
             "litter_weight_kg": self.detail.get("catLitterWeight"),
-            "total_clean_times": int(self.detail.get("inductionTimes", 0))
-            + int(self.detail.get("manualTimes", 0)),
+            "total_clean_times": self.total_clean_time,
             "manual_clean_times": self.detail.get("manualTimes"),
             "key_lock": self.detail.get("keyLock"),
             "safe_time": self.detail.get("safeTime"),
