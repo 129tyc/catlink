@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 
 API_C07_INFO = "token/cameraLitterbox/info"
+API_C07_CAMERA_SWITCH = "token/cameraLitterbox/cameraSwitch"
 API_C07_ACTION_COMMAND_V2 = "token/litterbox/actionCmd/v2"
 API_C07_BOX_FULL_SENSITIVITY = "token/litterbox/boxfullSensitivity"
 
@@ -131,6 +132,11 @@ class C07Device(LitterDevice):
         return _CAMERA_SWITCH_LABELS.get(raw, raw or "Unknown")
 
     @property
+    def camera_switch_control(self) -> str:
+        """Return the current value of the camera switch select."""
+        return self.camera_switch
+
+    @property
     def garbage_full(self) -> bool:
         """Return whether the API reports a full garbage bin."""
         errors = self.detail.get("deviceErrorList") or []
@@ -184,6 +190,12 @@ class C07Device(LitterDevice):
                 "state_attrs": self.box_full_sensitivity_attrs,
                 "async_select": self.select_box_full_sensitivity,
             },
+            "camera_switch_control": {
+                "icon": "mdi:camera-switch",
+                "options": list(_CAMERA_SWITCH_LABELS.values()),
+                "state_attrs": self.camera_switch_attrs,
+                "async_select": self.select_camera_switch,
+            },
         }
 
     def state_attrs(self) -> dict:
@@ -224,6 +236,10 @@ class C07Device(LitterDevice):
     def box_full_sensitivity_attrs(self) -> dict:
         """Return the raw box-full sensitivity value."""
         return {"raw_level": self.detail.get("boxFullSensitivity")}
+
+    def camera_switch_attrs(self) -> dict:
+        """Return the raw camera-switch value."""
+        return {"raw_camera_switch": self.detail.get("cameraSwitch")}
 
     async def update_device_detail(self) -> dict:
         """Update C07 detail from the camera-specific endpoint."""
@@ -294,6 +310,28 @@ class C07Device(LitterDevice):
         if response.get("returnCode", 0):
             error = format_api_error(response)
             _LOGGER.error("Select C07 box-full sensitivity failed: %s", error)
+            self._set_action_error(error)
+            return False
+        await self.update_device_detail()
+        return True
+
+    async def select_camera_switch(self, value, **kwargs) -> bool:
+        """Select which C07 camera channels are enabled."""
+        camera_switch = next(
+            (code for code, label in _CAMERA_SWITCH_LABELS.items() if label == value),
+            None,
+        )
+        if camera_switch is None:
+            _LOGGER.warning("Select C07 camera switch failed for %s", value)
+            return False
+        response = await self.account.request(
+            API_C07_CAMERA_SWITCH,
+            {"deviceId": self.id, "cameraSwitch": camera_switch},
+            "POST",
+        )
+        if not response or response.get("returnCode", 0):
+            error = format_api_error(response) if response else "Request failed"
+            _LOGGER.error("Select C07 camera switch failed: %s", error)
             self._set_action_error(error)
             return False
         await self.update_device_detail()

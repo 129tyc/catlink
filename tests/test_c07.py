@@ -61,6 +61,7 @@ def test_c07_state_and_garbage_fields(mock_coordinator, sample_c07_data) -> None
     assert "box_full_sensitivity" not in device.hass_sensor
     assert "action" in device.hass_select
     assert "box_full_sensitivity" in device.hass_select
+    assert "camera_switch_control" in device.hass_select
 
     device.detail["deviceErrorList"] = [{"errkey": "GARBAGE_FULL_ABNORMAL"}]
     assert device.garbage_full is True
@@ -127,6 +128,65 @@ def test_c07_camera_switch_mapping(
 
     assert device.camera_switch == expected
     assert device.state_attrs()["raw_camera_switch"] == raw_switch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "camera_switch"),
+    [
+        ("Off", "00"),
+        ("Second camera", "01"),
+        ("Main camera", "10"),
+        ("Both cameras", "11"),
+    ],
+)
+async def test_c07_camera_switch_control_uses_camera_switch_endpoint(
+    mock_coordinator, sample_c07_data, label, camera_switch
+) -> None:
+    """Control each C07 camera channel combination using the APK endpoint."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
+    device.update_device_detail = AsyncMock(return_value={})
+
+    assert await device.select_camera_switch(label) is True
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/cameraSwitch",
+        {"deviceId": "c07-device-id", "cameraSwitch": camera_switch},
+        "POST",
+    )
+    device.update_device_detail.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_c07_camera_switch_control_rejects_invalid_option(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """Do not send unsupported camera switch values to the API."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.request = AsyncMock()
+
+    assert await device.select_camera_switch("Invalid camera") is False
+    mock_coordinator.account.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"returnCode": 4001, "msg": "not allowed"},
+    ],
+)
+async def test_c07_camera_switch_control_failure_skips_refresh(
+    mock_coordinator, sample_c07_data, response
+) -> None:
+    """Report camera switch failures without refreshing stale state."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.request = AsyncMock(return_value=response)
+    device.update_device_detail = AsyncMock(return_value={})
+
+    assert await device.select_camera_switch("Both cameras") is False
+    device.update_device_detail.assert_not_awaited()
 
 
 def test_c07_box_full_sensitivity_mapping(mock_coordinator, sample_c07_data) -> None:
