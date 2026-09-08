@@ -256,6 +256,34 @@ class TestAccountRequest:
         assert CONF_TOKEN in params
         assert params[CONF_TOKEN] == "existing-token"
 
+    @pytest.mark.usefixtures("enable_custom_integrations")
+    async def test_request_retry_does_not_forward_internal_flag(self, account) -> None:
+        """Keep the token-retry marker out of aiohttp request kwargs."""
+        calls = []
+        responses = iter(
+            [
+                {"returnCode": 1002},
+                {"returnCode": 0, "data": {}},
+            ]
+        )
+
+        async def mock_request(method, url, **kwargs):
+            calls.append(kwargs)
+            response = MagicMock()
+            response.json = AsyncMock(return_value=next(responses))
+            return response
+
+        account.http.request = mock_request
+        with patch.object(
+            account, "async_login", new_callable=AsyncMock, return_value=True
+        ) as mock_login:
+            result = await account.request("token/device/list", {"type": "NONE"})
+
+        assert result == {"returnCode": 0, "data": {}}
+        assert len(calls) == 2
+        assert all("_retried" not in call for call in calls)
+        mock_login.assert_awaited_once_with()
+
 
 class TestAccountAsyncLogin:
     """Tests for Account async_login."""

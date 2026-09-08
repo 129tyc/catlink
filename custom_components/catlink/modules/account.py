@@ -93,6 +93,7 @@ class Account:
 
     async def request(self, api, pms=None, method="GET", **kwargs) -> dict:
         """Request the api."""
+        retried = kwargs.pop("_retried", False)
         method = method.upper()
         url = self.api_url(api)
         kws = {
@@ -125,7 +126,7 @@ class Account:
             _LOGGER.debug("API response %s %s: %s", method, api, result)
             
             # Handle token expiration (1002: Illegal token)
-            if result.get("returnCode") == 1002 and not kwargs.get("_retried"):
+            if result.get("returnCode") == 1002 and not retried:
                 _LOGGER.info("Token expired (1002), attempting re-login for %s", self.phone)
                 if await self.async_login():
                     kwargs["_retried"] = True
