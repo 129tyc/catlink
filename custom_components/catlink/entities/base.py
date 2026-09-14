@@ -16,12 +16,13 @@ class CatlinkEntity(CoordinatorEntity):
 
     def __init__(self, name, device: Device, option=None) -> None:
         """Initialize the entity."""
-        self.coordinator = device.coordinator
+        self._option = option or {}
+        coordinator_attr = self._option.get("coordinator_attr", "coordinator")
+        self.coordinator = getattr(device, coordinator_attr)
         CoordinatorEntity.__init__(self, self.coordinator)
-        self.account = self.coordinator.account
+        self.account = getattr(self.coordinator, "account", device.coordinator.account)
         self._name = name
         self._device = device
-        self._option = option or {}
         display_name = self._option.get("name", name)
         self._attr_name = f"{device.name} {display_name}".strip()
         self._attr_device_id = f"{device.type}_{device.mac}"
