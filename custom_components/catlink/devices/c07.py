@@ -12,7 +12,7 @@ from homeassistant.util import dt as dt_util
 from ..const import _LOGGER
 from ..helpers import format_api_error
 from ..models.additional_cfg import AdditionalDeviceConfig
-from ..models.c07_events import empty_event_data, event_state, normalize_records
+from ..models.c07_events import empty_event_data, normalize_records
 from .litter_device import LitterDevice
 
 if TYPE_CHECKING:
@@ -724,20 +724,19 @@ class C07Device(LitterDevice):
 
     @property
     def last_event(self) -> str:
-        """Return the normalized state of the latest event."""
+        """Return the API event text of the latest event."""
         record = self.event_data.get("last_event") or {}
-        return event_state(record)
+        value = record.get("event")
+        if isinstance(value, str) and value:
+            return value
+        if value is not None:
+            return str(value)
+        return "unknown"
 
     def last_event_attrs(self) -> dict:
-        """Return the latest event and a bounded event history."""
+        """Return the current event without embedding the event history."""
         record = self.event_data.get("last_event") or {}
-        return {
-            **record,
-            "records": self.event_data.get("records") or [],
-            "total": self.event_data.get("total"),
-            "current": self.event_data.get("current"),
-            "pages": self.event_data.get("pages"),
-        }
+        return dict(record)
 
     def event_image_url(self, role: str) -> str | None:
         """Return one latest-event image URL by its stable role name."""

@@ -696,7 +696,7 @@ async def test_c07_update_events_normalizes_records_and_resolves_picture_ids(
                     "records": [
                         {
                             "id": "event-1",
-                            "event": "poop",
+                            "event": "Cats appear",
                             "time": "2026-09-13 10:00:00",
                             "picIdOfPre": "before-1",
                             "picOnSite": "onsite-1",
@@ -723,7 +723,7 @@ async def test_c07_update_events_normalizes_records_and_resolves_picture_ids(
     result = await device.update_events()
 
     assert result["last_event"]["event_id"] == "event-1"
-    assert device.last_event == "defecation"
+    assert device.last_event == "Cats appear"
     assert device.event_image_url("last_event_before") == (
         "https://example.invalid/before.jpg"
     )
@@ -733,9 +733,12 @@ async def test_c07_update_events_normalizes_records_and_resolves_picture_ids(
     assert device.event_image_url("last_event_on_site") == (
         "https://example.invalid/onsite.jpg"
     )
-    assert device.last_event_attrs()["records"][0]["on_site_image"] == (
-        "https://example.invalid/onsite.jpg"
-    )
+    attrs = device.last_event_attrs()
+    assert attrs["event"] == "Cats appear"
+    assert "records" not in attrs
+    assert "total" not in attrs
+    assert "current" not in attrs
+    assert "pages" not in attrs
 
 
 @pytest.mark.asyncio

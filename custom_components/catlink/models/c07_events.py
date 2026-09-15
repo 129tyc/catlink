@@ -76,24 +76,6 @@ def normalize_records(records: Any, limit: int = 10) -> list[dict[str, Any]]:
     return result
 
 
-def event_state(record: dict[str, Any]) -> str:
-    """Return a small stable state for the latest event sensor."""
-    value = " ".join(
-        str(record.get(field) or "")
-        for field in ("event", "type", "biz_type", "subtitle")
-    ).lower()
-    if any(word in value for word in ("cleaned", "clean complete", "clean_complete")):
-        return "cleaned"
-    if any(word in value for word in ("clean", "pave", "empty")):
-        return "cleaning"
-    if any(
-        word in value
-        for word in ("defecat", "poop", "pee", "urine", "toilet", "visit")
-    ):
-        return "defecation"
-    return "unknown"
-
-
 def empty_event_data() -> dict[str, Any]:
     """Return the stable empty event coordinator payload."""
     return {
