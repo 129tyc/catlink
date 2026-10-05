@@ -194,6 +194,32 @@ wget -O - https://get.hacs.vip | DOMAIN=catlink REPO_PATH=hasscc/catlink ARCHIVE
 
 </div>
 
+#### Visual C07 controls
+
+C07 exposes four start buttons: Start cleaning, Start paving, Start emptying,
+and Start adding sand. Three shared buttons Pause current operation, Resume
+current operation, and Cancel current operation control whichever task the
+device currently reports, including tasks started in the CATLINK App.
+Use `button.press` in automations. Their entity keys are `clean_start`,
+`pave_start`, `empty_start`, `add_sand_start`, `operation_pause`,
+`operation_resume`, and `operation_cancel`.
+
+Each command refreshes the device status before selecting its target. Starts
+require idle feedback; pause requires a running task; resume requires a paused
+task; cancel accepts running or paused tasks. Unknown, offline, cancelling, or
+unconfirmed device feedback is rejected with a Home Assistant error. Commands
+are serialized per device. Add sand uses `add_sand_copies` only for a new task,
+not when resuming one.
+
+The existing `clean_status` sensor is displayed as Operation status and reports
+actual device feedback. Cancellation remains Cancelling until the device
+reports idle; command acceptance alone does not mark an operation completed.
+
+The action select is retained for existing automations, but defaults to disabled
+when newly registered. Existing enabled entities remain enabled. It uses the
+same validation as the buttons and follows `finalStatus`, returning to `Idle`
+after the device confirms completion. Selecting `Idle` sends no command.
+
 #### Cats
 
 <div style="display: flex; justify-content: space-around;">

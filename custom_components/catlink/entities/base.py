@@ -31,6 +31,9 @@ class CatlinkEntity(CoordinatorEntity):
         object_id = f"{device.type}_{mac}_{name}"
         self.entity_id = f"{DOMAIN}.{slugify(object_id)}"
         self._attr_icon = self._option.get("icon")
+        self._attr_entity_registry_enabled_default = self._option.get(
+            "entity_registry_enabled_default", True
+        )
         self._attr_device_class = self._option.get("class")
         self._attr_native_unit_of_measurement = self._option.get("unit")
         self._attr_state_class = self._option.get("state_class")

@@ -5,7 +5,7 @@ from homeassistant.components.button import ButtonEntity
 from .base import CatlinkEntity
 
 
-class CatlinkButtonEntity(CatlinkEntity, ButtonEntity):
+class CatlinkButtonEntity(ButtonEntity, CatlinkEntity):
     """Button entity for CatLink."""
 
     async def async_press(self):

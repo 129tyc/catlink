@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -40,6 +42,7 @@ API_C07_EVENT_TIMELINE = "token/litterbox/stats/log/timeline"
 API_C07_GET_PIC_URL = "token/cameraLitterbox/getPicUrl"
 
 _GARBAGE_FULL_ERROR = "GARBAGE_FULL_ABNORMAL"
+_ACTION_IDLE = "Idle"
 _GARBAGE_NEARLY_FULL_ERROR = "GARBAGE_TOBE_FULL_ABNORMAL"
 _RADAR_PROTECTION_ERRORS = {"RADAR_PROTECTED", "WEIGHT_PROTECTED"}
 _DEVICE_ERROR_LABELS = {
@@ -55,16 +58,16 @@ _DEVICE_ERROR_LABELS = {
 _FINAL_STATUS_LABELS = {
     "CLEAN_RUN": "Cleaning",
     "CLEAN_PAUSE": "Cleaning paused",
-    "CLEAN_CANCEL": "Idle",
+    "CLEAN_CANCEL": "Cancelling cleaning",
     "PAVE_RUN": "Paving",
     "PAVE_PAUSE": "Paving paused",
-    "PAVE_CANCEL": "Idle",
+    "PAVE_CANCEL": "Cancelling paving",
     "EMPTY_RUN": "Emptying",
     "EMPTY_PAUSE": "Emptying paused",
-    "EMPTY_CANCEL": "Idle",
+    "EMPTY_CANCEL": "Cancelling emptying",
     "ADD_SAND_RUN": "Adding sand",
     "ADD_SAND_PAUSE": "Adding sand paused",
-    "ADD_SAND_CANCEL": "Idle",
+    "ADD_SAND_CANCEL": "Cancelling sand addition",
 }
 _GARBAGE_STATUS_LABELS = {
     "00": "Low",
@@ -112,7 +115,7 @@ class C07Device(LitterDevice):
     ) -> None:
         """Initialize the C07 device."""
         super().__init__(dat, coordinator, additional_config)
-        self._last_action: str | None = None
+        self._operation_lock = asyncio.Lock()
         self._add_sand_copies = 1
         self.event_coordinator: DataUpdateCoordinator | None = None
         self.event_data = empty_event_data()
@@ -125,6 +128,7 @@ class C07Device(LitterDevice):
                 self.account.hass,
                 _LOGGER,
                 name=f"catlink-{self.id}-events",
+                config_entry=self.coordinator.config_entry,
                 update_method=self.update_events,
                 update_interval=timedelta(minutes=1),
             )
@@ -150,8 +154,16 @@ class C07Device(LitterDevice):
 
     @property
     def action(self) -> str | None:
-        """Return the last requested action."""
-        return self._last_action
+        """Reflect the device operation so completed commands can be repeated."""
+        if "finalStatus" not in self.detail:
+            return None
+        final_status = self.detail["finalStatus"]
+        if final_status is None or final_status == "":
+            return _ACTION_IDLE
+        if not isinstance(final_status, str):
+            return None
+        behavior, _, command = final_status.rpartition("_")
+        return self.actions.get(f"{behavior}:{command}")
 
     @property
     def state(self) -> str:
@@ -509,7 +521,7 @@ class C07Device(LitterDevice):
             },
             "online": {"icon": "mdi:wifi"},
             "garbage_status": {"icon": "mdi:delete"},
-            "clean_status": {"icon": "mdi:broom"},
+            "clean_status": {"icon": "mdi:broom", "name": "Operation status"},
             "manual_clean_time": {"icon": "mdi:history", "unit": "times"},
             "induction_clean_time": {"icon": "mdi:autorenew", "unit": "times"},
             "clear_time": {"icon": "mdi:delete-sweep", "unit": "times"},
@@ -609,14 +621,43 @@ class C07Device(LitterDevice):
         }
 
     @property
+    def hass_button(self) -> dict:
+        """Expose four starts and controls for the current device operation."""
+        buttons = {
+            f"{behavior.lower()}_start": {
+                "name": label,
+                "icon": "mdi:play",
+                "async_press": partial(self.async_start_operation, behavior),
+            }
+            for behavior, label in {
+                "CLEAN": "Start cleaning",
+                "PAVE": "Start paving",
+                "EMPTY": "Start emptying",
+                "ADD_SAND": "Start adding sand",
+            }.items()
+        }
+        for key, label, command, icon in (
+            ("operation_pause", "Pause current operation", "PAUSE", "mdi:pause"),
+            ("operation_resume", "Resume current operation", "RUN", "mdi:play"),
+            ("operation_cancel", "Cancel current operation", "CANCEL", "mdi:stop"),
+        ):
+            buttons[key] = {
+                "name": label,
+                "icon": icon,
+                "async_press": partial(self.async_control_operation, command),
+            }
+        return buttons
+
+    @property
     def hass_select(self) -> dict:
         """Return C07 selects using the integration's existing pattern."""
         return {
             "action": {
                 "icon": "mdi:play-box",
-                "options": list(self.actions.values()),
+                "options": [_ACTION_IDLE, *self.actions.values()],
                 "async_select": self.select_action,
                 "delay_update": 5,
+                "entity_registry_enabled_default": False,
             },
             "box_full_sensitivity": {
                 "icon": "mdi:tune",
@@ -904,8 +945,65 @@ class C07Device(LitterDevice):
                     type(exc).__name__,
                 )
 
+    async def async_start_operation(self, behavior: str) -> None:
+        """Start a new operation, only when the device confirms it is idle."""
+        await self._async_operation_command(behavior, "RUN", start_only=True)
+
+    async def async_control_operation(self, command: str) -> None:
+        """Control the operation reported by the device, including App starts."""
+        await self._async_operation_command(None, command)
+
+    async def _async_operation_command(
+        self, behavior: str | None, command: str, *, start_only: bool = False
+    ) -> None:
+        """Resolve and validate a fresh device state before sending a command."""
+        async with self._operation_lock:
+            previous = self.detail
+            detail = await self.update_device_detail()
+            if detail is previous:
+                raise HomeAssistantError("Unable to refresh C07 operation status")
+            if not self._flag(detail.get("online")):
+                raise HomeAssistantError("C07 device is offline")
+            if "finalStatus" not in detail:
+                raise HomeAssistantError("C07 operation status is unknown")
+            final_status = detail["finalStatus"]
+            if final_status is not None and not isinstance(final_status, str):
+                raise HomeAssistantError("C07 operation status is unknown")
+            idle = final_status in (None, "")
+            if not idle and final_status not in _FINAL_STATUS_LABELS:
+                raise HomeAssistantError("C07 operation status is unknown")
+            current_behavior, _, phase = str(final_status or "").rpartition("_")
+            if phase == "CANCEL":
+                raise HomeAssistantError("C07 operation is being cancelled")
+            if start_only and not idle:
+                raise HomeAssistantError("C07 is already performing an operation")
+            if behavior is None:
+                if idle:
+                    raise HomeAssistantError("C07 has no current operation")
+                behavior = current_behavior
+            elif not idle and behavior != current_behavior:
+                raise HomeAssistantError("C07 is performing a different operation")
+            if command == "PAUSE" and phase != "RUN":
+                raise HomeAssistantError("C07 operation is not running")
+            if command == "CANCEL" and phase not in {"RUN", "PAUSE"}:
+                raise HomeAssistantError("C07 has no operation to cancel")
+            if command == "RUN" and not idle and phase != "PAUSE":
+                raise HomeAssistantError("C07 operation is already running")
+            payload = {"deviceId": self.id, "behavior": behavior, "action": command}
+            if behavior == "ADD_SAND" and command == "RUN" and idle:
+                payload["copies"] = str(self.add_sand_copies)
+            response = await self.account.request(
+                API_C07_ACTION_COMMAND_V2, payload, "POST"
+            )
+            if not await self._handle_action_response(response, "C07 operation"):
+                raise HomeAssistantError(self.error)
+            _LOGGER.info("Requested C07 operation %s:%s for %s", behavior, command, self.id)
+
     async def select_action(self, action, **kwargs) -> bool:
         """Select a C07 operation action."""
+        if action == _ACTION_IDLE:
+            # Idle is a display value, not a command to stop the device.
+            return True
         action_code = next(
             (code for code, label in self.actions.items() if label == action), None
         )
@@ -913,22 +1011,11 @@ class C07Device(LitterDevice):
             _LOGGER.warning("Select C07 action failed for %s", action)
             return False
         behavior, command = action_code.split(":", 1)
-        payload = {
-            "deviceId": self.id,
-            "behavior": behavior,
-            "action": command,
-        }
-        if behavior == "ADD_SAND" and command == "RUN":
-            payload["copies"] = str(self.add_sand_copies)
-        response = await self.account.request(
-            API_C07_ACTION_COMMAND_V2,
-            payload,
-            "POST",
-        )
-        if not await self._handle_action_response(response, "Select C07 action"):
+        try:
+            await self._async_operation_command(behavior, command)
+        except HomeAssistantError as exc:
+            self._set_action_error(str(exc))
             return False
-        self._last_action = action
-        _LOGGER.info("Selected C07 action %s for %s", action, self.id)
         return True
 
     async def select_box_full_sensitivity(self, level, **kwargs) -> bool:

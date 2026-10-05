@@ -1,11 +1,20 @@
 """Tests for VISUAL_C07 support."""
 
+import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.catlink.devices.c07 import C07Device
 from custom_components.catlink.devices.registry import DEVICE_TYPES
+from custom_components.catlink.entities.button import CatlinkButtonEntity
+from custom_components.catlink.entities.select import CatlinkSelectEntity
+from homeassistant.components.button import DATA_COMPONENT as BUTTON_COMPONENT
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 
 @pytest.fixture
@@ -27,6 +36,15 @@ def sample_c07_data():
         "deviceName": "C07 test device",
         "deviceType": "VISUAL_C07",
     }
+
+
+def mock_operation_feedback(device, final_status=""):
+    """Return a fresh online device snapshot for operation command tests."""
+    async def refresh():
+        device.detail = {**device.detail, "online": True, "finalStatus": final_status}
+        return device.detail
+
+    device.update_device_detail = AsyncMock(side_effect=refresh)
 
 
 def test_c07_is_registered() -> None:
@@ -125,16 +143,16 @@ def test_c07_state_and_garbage_fields(mock_coordinator, sample_c07_data) -> None
     [
         ("CLEAN_RUN", "Cleaning"),
         ("CLEAN_PAUSE", "Cleaning paused"),
-        ("CLEAN_CANCEL", "Idle"),
+        ("CLEAN_CANCEL", "Cancelling cleaning"),
         ("PAVE_RUN", "Paving"),
         ("PAVE_PAUSE", "Paving paused"),
-        ("PAVE_CANCEL", "Idle"),
+        ("PAVE_CANCEL", "Cancelling paving"),
         ("EMPTY_RUN", "Emptying"),
         ("EMPTY_PAUSE", "Emptying paused"),
-        ("EMPTY_CANCEL", "Idle"),
+        ("EMPTY_CANCEL", "Cancelling emptying"),
         ("ADD_SAND_RUN", "Adding sand"),
         ("ADD_SAND_PAUSE", "Adding sand paused"),
-        ("ADD_SAND_CANCEL", "Idle"),
+        ("ADD_SAND_CANCEL", "Cancelling sand addition"),
     ],
 )
 def test_c07_apk_final_status_mapping(
@@ -589,7 +607,7 @@ async def test_c07_add_sand_copies_are_sent_with_run_action(
     device = C07Device(sample_c07_data, mock_coordinator)
     device.add_sand_copies = 3
     mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    device.update_device_detail = AsyncMock(return_value={})
+    mock_operation_feedback(device)
 
     assert await device.select_action("Add sand: start") is True
     mock_coordinator.account.request.assert_awaited_once_with(
@@ -628,6 +646,7 @@ async def test_c07_action_error_takes_precedence_over_device_error(
     """Keep the immediate action failure visible until the next refresh."""
     device = C07Device(sample_c07_data, mock_coordinator)
     device.detail = {"deviceErrorList": [{"errkey": "ENGINE_PROTECTED"}]}
+    mock_operation_feedback(device)
     mock_coordinator.account.request = AsyncMock(
         return_value={"returnCode": 4001, "msg": "not allowed"}
     )
@@ -671,7 +690,7 @@ async def test_c07_update_device_detail_keeps_previous_data_on_failure(
 ) -> None:
     """Do not turn all C07 entities unknown on a failed detail refresh."""
     device = C07Device(sample_c07_data, mock_coordinator)
-    previous = {"online": True, "cameraSwitch": "11"}
+    previous = {"online": True, "cameraSwitch": "11", "finalStatus": "CLEAN_RUN"}
     device.detail = previous
     mock_coordinator.account.request = AsyncMock(
         return_value={"returnCode": 1003, "data": {}}
@@ -679,6 +698,7 @@ async def test_c07_update_device_detail_keeps_previous_data_on_failure(
 
     assert await device.update_device_detail() is previous
     assert device.detail is previous
+    assert device.action == "Clean: start"
 
 
 @pytest.mark.asyncio
@@ -762,10 +782,12 @@ async def test_c07_update_events_keeps_previous_data_on_failure(
 
 @pytest.mark.asyncio
 async def test_c07_async_init_skips_unsupported_logs(
-    mock_coordinator, sample_c07_data
+    hass, mock_coordinator, sample_c07_data
 ) -> None:
     """C07 initialization must not require the generic log endpoint."""
     device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.hass = hass
+    mock_coordinator.config_entry = None
     mock_coordinator.account.hass.config.time_zone = "UTC"
     mock_coordinator.account.request = AsyncMock(
         return_value={"data": {"deviceInfo": {"online": True}}}
@@ -782,13 +804,346 @@ async def test_c07_async_init_skips_unsupported_logs(
 
 
 @pytest.mark.asyncio
+async def test_c07_clean_button_can_be_pressed_repeatedly_through_ha(
+    hass, mock_coordinator, sample_c07_data
+) -> None:
+    """Each HA button.press call sends RUN and keeps HA's press timestamp."""
+    coordinator = DataUpdateCoordinator(
+        hass, logging.getLogger(__name__), name="c07-test", config_entry=None
+    )
+    coordinator.account = mock_coordinator.account
+    device = C07Device(sample_c07_data, coordinator)
+    device.detail = {"online": True, "finalStatus": ""}
+    entity = CatlinkButtonEntity(
+        "clean_start", device, device.hass_button["clean_start"]
+    )
+    assert await async_setup_component(hass, "button", {})
+    await hass.data[BUTTON_COMPONENT].async_add_entities([entity])
+    await hass.async_block_till_done()
+
+    mock_coordinator.account.request = AsyncMock(
+        side_effect=[
+            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
+            {"returnCode": 0},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
+            {"data": {"deviceInfo": {
+                "online": True, "finalStatus": "", "cleanStatus": "00"
+            }}},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
+            {"returnCode": 0},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
+        ]
+    )
+    await hass.services.async_call(
+        "button", "press", {"entity_id": entity.entity_id}, blocking=True
+    )
+    assert dt_util.parse_datetime(hass.states.get(entity.entity_id).state) is not None
+    await device.update_device_detail()
+    assert device.clean_status == "Idle"
+    await hass.services.async_call(
+        "button", "press", {"entity_id": entity.entity_id}, blocking=True
+    )
+    commands = [
+        call for call in mock_coordinator.account.request.await_args_list
+        if call.args[0] == "token/cameraLitterbox/actionCmd/v2"
+    ]
+    assert len(commands) == 2
+    assert all(call.args[1]["action"] == "RUN" for call in commands)
+    assert dt_util.parse_datetime(hass.states.get(entity.entity_id).state) is not None
+
+
+@pytest.mark.asyncio
+async def test_c07_command_buttons_use_existing_payloads(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """Four start buttons preserve operation semantics and add-sand quantities."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.add_sand_copies = 2
+    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
+    mock_operation_feedback(device)
+    assert set(device.hass_button) == {
+        "clean_start", "pave_start", "empty_start", "add_sand_start",
+        "operation_pause", "operation_resume", "operation_cancel",
+    }
+    for behavior in ("CLEAN", "PAVE", "EMPTY", "ADD_SAND"):
+        command = "RUN"
+        key = f"{behavior.lower()}_start"
+        await device.hass_button[key]["async_press"]()
+        payload = {"deviceId": device.id, "behavior": behavior, "action": command}
+        if behavior == "ADD_SAND" and command == "RUN":
+            payload["copies"] = "2"
+        mock_coordinator.account.request.assert_awaited_with(
+            "token/cameraLitterbox/actionCmd/v2", payload, "POST"
+        )
+
+
+@pytest.mark.asyncio
+async def test_c07_button_rejection_raises_ha_error(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """A rejected press must fail the HA service rather than silently return."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_operation_feedback(device)
+    mock_coordinator.account.request = AsyncMock(
+        return_value={"returnCode": 4001, "msg": "not allowed"}
+    )
+    with pytest.raises(HomeAssistantError, match="not allowed"):
+        await device.hass_button["clean_start"]["async_press"]()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("behavior", ["CLEAN", "PAVE", "EMPTY", "ADD_SAND"])
+@pytest.mark.parametrize(
+    ("key", "phase", "command"),
+    [
+        ("operation_pause", "RUN", "PAUSE"),
+        ("operation_resume", "PAUSE", "RUN"),
+        ("operation_cancel", "RUN", "CANCEL"),
+        ("operation_cancel", "PAUSE", "CANCEL"),
+    ],
+)
+async def test_c07_shared_controls_follow_fresh_app_operation(
+    mock_coordinator, sample_c07_data, behavior, key, phase, command
+) -> None:
+    """Resolve App-started tasks from fresh feedback, not cached HA commands."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"online": True, "finalStatus": "EMPTY_RUN"}
+    device.add_sand_copies = 3
+    mock_operation_feedback(device, f"{behavior}_{phase}")
+    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
+
+    await device.hass_button[key]["async_press"]()
+
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/actionCmd/v2",
+        {"deviceId": device.id, "behavior": behavior, "action": command},
+        "POST",
+    )
+    # In particular, resuming ADD_SAND must not submit copies again.
+    assert device.update_device_detail.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "final_status"),
+    [
+        ("clean_start", "PAVE_RUN"),
+        ("clean_start", "CLEAN_RUN"),
+        ("clean_start", "CLEAN_PAUSE"),
+        ("operation_pause", ""),
+        ("operation_pause", "CLEAN_PAUSE"),
+        ("operation_resume", ""),
+        ("operation_resume", "CLEAN_RUN"),
+        ("operation_cancel", ""),
+        ("clean_start", "CLEAN_CANCEL"),
+        ("operation_pause", "CLEAN_CANCEL"),
+        ("operation_resume", "CLEAN_CANCEL"),
+        ("operation_cancel", "CLEAN_CANCEL"),
+        ("operation_pause", "NEW_UNKNOWN_STATUS"),
+        ("clean_start", {"unexpected": "status"}),
+    ],
+)
+async def test_c07_invalid_operation_controls_send_no_command(
+    mock_coordinator, sample_c07_data, key, final_status
+) -> None:
+    """Reject conflicting, stale, or inapplicable controls before POST."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_operation_feedback(device, final_status)
+    mock_coordinator.account.request = AsyncMock()
+
+    with pytest.raises(HomeAssistantError):
+        await device.hass_button[key]["async_press"]()
+    mock_coordinator.account.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"returnCode": 1003, "data": {}},
+        {"data": {"deviceInfo": {"online": False, "finalStatus": "CLEAN_RUN"}}},
+        {"data": {"deviceInfo": {"online": True}}},
+    ],
+)
+async def test_c07_current_control_rejects_unconfirmed_feedback(
+    mock_coordinator, sample_c07_data, response
+) -> None:
+    """Never use a stale cached operation when its fresh status is unavailable."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"online": True, "finalStatus": "CLEAN_RUN"}
+    mock_coordinator.account.request = AsyncMock(return_value=response)
+
+    with pytest.raises(HomeAssistantError):
+        await device.hass_button["operation_pause"]["async_press"]()
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/info", {"deviceId": device.id}
+    )
+
+
+@pytest.mark.asyncio
+async def test_c07_simultaneous_starts_refresh_under_one_lock(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """The second start checks feedback after the first operation is accepted."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    remote_status = ""
+
+    async def request(endpoint, params, method="GET"):
+        nonlocal remote_status
+        await asyncio.sleep(0)
+        if endpoint == "token/cameraLitterbox/info":
+            return {"data": {"deviceInfo": {
+                "online": True, "finalStatus": remote_status
+            }}}
+        remote_status = f"{params['behavior']}_{params['action']}"
+        return {"returnCode": 0}
+
+    mock_coordinator.account.request = AsyncMock(side_effect=request)
+    result = await asyncio.gather(
+        device.hass_button["clean_start"]["async_press"](),
+        device.hass_button["pave_start"]["async_press"](),
+        return_exceptions=True,
+    )
+    assert result[0] is None
+    assert isinstance(result[1], HomeAssistantError)
+    commands = [
+        call for call in mock_coordinator.account.request.await_args_list
+        if call.args[0] == "token/cameraLitterbox/actionCmd/v2"
+    ]
+    assert len(commands) == 1
+    assert commands[0].args[1]["behavior"] == "CLEAN"
+
+
+@pytest.mark.asyncio
+async def test_c07_cancel_waits_for_device_idle_feedback(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """A successful CANCEL response is not evidence of completed cancellation."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.request = AsyncMock(side_effect=[
+        {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
+        {"returnCode": 0},
+        {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_CANCEL"}}},
+        {"data": {"deviceInfo": {
+            "online": True, "finalStatus": "", "cleanStatus": "00"
+        }}},
+    ])
+    await device.hass_button["operation_cancel"]["async_press"]()
+    assert device.clean_status == "Cancelling cleaning"
+    await device.update_device_detail()
+    assert device.clean_status == "Idle"
+
+
+@pytest.mark.asyncio
+async def test_c07_action_returns_to_idle_and_can_start_again(
+    hass, mock_coordinator, sample_c07_data
+) -> None:
+    """Publish idle after completion, then send the same start command again."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"online": True, "finalStatus": "", "cleanStatus": "00"}
+    option = {**device.hass_select["action"], "delay_update": None}
+    entity = CatlinkSelectEntity("action", device, option)
+    entity.hass = hass
+    entity.entity_id = "select.c07_action"
+    device.listeners[entity.entity_id] = entity._handle_coordinator_update
+    entity._handle_coordinator_update()
+    assert hass.states.get(entity.entity_id).state == "Idle"
+
+    mock_coordinator.account.request = AsyncMock(
+        side_effect=[
+            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
+            {"returnCode": 0},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
+            {"data": {"deviceInfo": {
+                "online": True, "finalStatus": "", "cleanStatus": "00"
+            }}},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
+            {"returnCode": 0},
+            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
+        ]
+    )
+    assert await entity.async_select_option("Clean: start") is True
+    assert hass.states.get(entity.entity_id).state == "Clean: start"
+
+    await device.update_device_detail()
+    assert entity.current_option == "Idle"
+    assert hass.states.get(entity.entity_id).state == "Idle"
+
+    assert await entity.async_select_option("Clean: start") is True
+    assert hass.states.get(entity.entity_id).state == "Clean: start"
+    commands = [
+        call for call in mock_coordinator.account.request.await_args_list
+        if call.args[0] == "token/cameraLitterbox/actionCmd/v2"
+    ]
+    assert len(commands) == 2
+    for call in commands:
+        assert call.args == (
+            "token/cameraLitterbox/actionCmd/v2",
+            {"deviceId": "c07-device-id", "behavior": "CLEAN", "action": "RUN"},
+            "POST",
+        )
+
+
+@pytest.mark.parametrize(
+    ("final_status", "expected"),
+    [
+        (None, "Idle"),
+        ("", "Idle"),
+        (False, None),
+        (0, None),
+        ({}, None),
+        ([], None),
+        ("CLEAN_RUN", "Clean: start"),
+        ("CLEAN_PAUSE", "Clean: pause"),
+        ("CLEAN_CANCEL", "Clean: cancel"),
+        ("PAVE_RUN", "Pave: start"),
+        ("EMPTY_RUN", "Empty: start"),
+        ("ADD_SAND_RUN", "Add sand: start"),
+        ("ADD_SAND_PAUSE", "Add sand: pause"),
+        ("ADD_SAND_CANCEL", "Add sand: cancel"),
+        ("UNRECOGNIZED_STATUS", None),
+    ],
+)
+def test_c07_action_follows_device_status(
+    mock_coordinator, sample_c07_data, final_status, expected
+) -> None:
+    """Use device feedback rather than a cached command, including add-sand."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"finalStatus": final_status}
+    assert device.action == expected
+    assert expected is None or expected in device.hass_select["action"]["options"]
+
+
+def test_c07_missing_action_feedback_is_unknown(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """A partial response does not prove that the device has completed a task."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"online": True}
+    assert device.action is None
+
+
+@pytest.mark.asyncio
+async def test_c07_idle_selection_does_not_send_a_command(
+    mock_coordinator, sample_c07_data
+) -> None:
+    """The idle display option must never cancel or restart an operation."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"finalStatus": "CLEAN_RUN"}
+    mock_coordinator.account.request = AsyncMock()
+    assert await device.select_action("Idle") is True
+    mock_coordinator.account.request.assert_not_awaited()
+    assert device.action == "Clean: start"
+
+
+@pytest.mark.asyncio
 async def test_c07_clean_action_uses_existing_action_select_pattern(
     mock_coordinator, sample_c07_data
 ) -> None:
     """Start cleaning through the C07 action command endpoint."""
     device = C07Device(sample_c07_data, mock_coordinator)
     mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    device.update_device_detail = AsyncMock(return_value={})
+    mock_operation_feedback(device)
 
     assert await device.select_action("Clean: start") is True
     mock_coordinator.account.request.assert_awaited_once_with(
@@ -796,7 +1151,7 @@ async def test_c07_clean_action_uses_existing_action_select_pattern(
         {"deviceId": "c07-device-id", "behavior": "CLEAN", "action": "RUN"},
         "POST",
     )
-    device.update_device_detail.assert_awaited_once_with()
+    assert device.update_device_detail.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -823,7 +1178,7 @@ async def test_c07_clean_action_variants(
     """Use the existing action select shape for pause and cancel."""
     device = C07Device(sample_c07_data, mock_coordinator)
     mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    device.update_device_detail = AsyncMock(return_value={})
+    mock_operation_feedback(device, "" if action == "RUN" else f"{behavior}_RUN")
 
     assert await device.select_action(label) is True
     expected_payload = {
@@ -844,6 +1199,7 @@ async def test_c07_clean_action_variants(
 async def test_c07_action_error_is_reported(mock_coordinator, sample_c07_data) -> None:
     """Expose API action failures through the existing action-error path."""
     device = C07Device(sample_c07_data, mock_coordinator)
+    mock_operation_feedback(device)
     mock_coordinator.account.request = AsyncMock(
         return_value={"returnCode": 4001, "msg": "not allowed"}
     )
