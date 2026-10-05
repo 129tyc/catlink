@@ -42,7 +42,6 @@ API_C07_EVENT_TIMELINE = "token/litterbox/stats/log/timeline"
 API_C07_GET_PIC_URL = "token/cameraLitterbox/getPicUrl"
 
 _GARBAGE_FULL_ERROR = "GARBAGE_FULL_ABNORMAL"
-_ACTION_IDLE = "Idle"
 _GARBAGE_NEARLY_FULL_ERROR = "GARBAGE_TOBE_FULL_ABNORMAL"
 _RADAR_PROTECTION_ERRORS = {"RADAR_PROTECTED", "WEIGHT_PROTECTED"}
 _DEVICE_ERROR_LABELS = {
@@ -133,37 +132,6 @@ class C07Device(LitterDevice):
                 update_interval=timedelta(minutes=1),
             )
             await self.event_coordinator.async_refresh()
-
-    @property
-    def actions(self) -> dict[str, str]:
-        """Return the supported C07 operation actions."""
-        return {
-            "CLEAN:RUN": "Clean: start",
-            "CLEAN:PAUSE": "Clean: pause",
-            "CLEAN:CANCEL": "Clean: cancel",
-            "PAVE:RUN": "Pave: start",
-            "PAVE:PAUSE": "Pave: pause",
-            "PAVE:CANCEL": "Pave: cancel",
-            "EMPTY:RUN": "Empty: start",
-            "EMPTY:PAUSE": "Empty: pause",
-            "EMPTY:CANCEL": "Empty: cancel",
-            "ADD_SAND:RUN": "Add sand: start",
-            "ADD_SAND:PAUSE": "Add sand: pause",
-            "ADD_SAND:CANCEL": "Add sand: cancel",
-        }
-
-    @property
-    def action(self) -> str | None:
-        """Reflect the device operation so completed commands can be repeated."""
-        if "finalStatus" not in self.detail:
-            return None
-        final_status = self.detail["finalStatus"]
-        if final_status is None or final_status == "":
-            return _ACTION_IDLE
-        if not isinstance(final_status, str):
-            return None
-        behavior, _, command = final_status.rpartition("_")
-        return self.actions.get(f"{behavior}:{command}")
 
     @property
     def state(self) -> str:
@@ -652,13 +620,6 @@ class C07Device(LitterDevice):
     def hass_select(self) -> dict:
         """Return C07 selects using the integration's existing pattern."""
         return {
-            "action": {
-                "icon": "mdi:play-box",
-                "options": [_ACTION_IDLE, *self.actions.values()],
-                "async_select": self.select_action,
-                "delay_update": 5,
-                "entity_registry_enabled_default": False,
-            },
             "box_full_sensitivity": {
                 "icon": "mdi:tune",
                 "options": list(self.box_full_levels.values()),
@@ -947,14 +908,14 @@ class C07Device(LitterDevice):
 
     async def async_start_operation(self, behavior: str) -> None:
         """Start a new operation, only when the device confirms it is idle."""
-        await self._async_operation_command(behavior, "RUN", start_only=True)
+        await self._async_operation_command(behavior, "RUN")
 
     async def async_control_operation(self, command: str) -> None:
         """Control the operation reported by the device, including App starts."""
         await self._async_operation_command(None, command)
 
     async def _async_operation_command(
-        self, behavior: str | None, command: str, *, start_only: bool = False
+        self, behavior: str | None, command: str
     ) -> None:
         """Resolve and validate a fresh device state before sending a command."""
         async with self._operation_lock:
@@ -975,14 +936,12 @@ class C07Device(LitterDevice):
             current_behavior, _, phase = str(final_status or "").rpartition("_")
             if phase == "CANCEL":
                 raise HomeAssistantError("C07 operation is being cancelled")
-            if start_only and not idle:
+            if behavior is not None and not idle:
                 raise HomeAssistantError("C07 is already performing an operation")
             if behavior is None:
                 if idle:
                     raise HomeAssistantError("C07 has no current operation")
                 behavior = current_behavior
-            elif not idle and behavior != current_behavior:
-                raise HomeAssistantError("C07 is performing a different operation")
             if command == "PAUSE" and phase != "RUN":
                 raise HomeAssistantError("C07 operation is not running")
             if command == "CANCEL" and phase not in {"RUN", "PAUSE"}:
@@ -998,25 +957,6 @@ class C07Device(LitterDevice):
             if not await self._handle_action_response(response, "C07 operation"):
                 raise HomeAssistantError(self.error)
             _LOGGER.info("Requested C07 operation %s:%s for %s", behavior, command, self.id)
-
-    async def select_action(self, action, **kwargs) -> bool:
-        """Select a C07 operation action."""
-        if action == _ACTION_IDLE:
-            # Idle is a display value, not a command to stop the device.
-            return True
-        action_code = next(
-            (code for code, label in self.actions.items() if label == action), None
-        )
-        if action_code is None:
-            _LOGGER.warning("Select C07 action failed for %s", action)
-            return False
-        behavior, command = action_code.split(":", 1)
-        try:
-            await self._async_operation_command(behavior, command)
-        except HomeAssistantError as exc:
-            self._set_action_error(str(exc))
-            return False
-        return True
 
     async def select_box_full_sensitivity(self, level, **kwargs) -> bool:
         """Select the C07 box-full sensitivity level."""

@@ -9,7 +9,6 @@ import pytest
 from custom_components.catlink.devices.c07 import C07Device
 from custom_components.catlink.devices.registry import DEVICE_TYPES
 from custom_components.catlink.entities.button import CatlinkButtonEntity
-from custom_components.catlink.entities.select import CatlinkSelectEntity
 from homeassistant.components.button import DATA_COMPONENT as BUTTON_COMPONENT
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -91,7 +90,7 @@ def test_c07_state_and_garbage_fields(mock_coordinator, sample_c07_data) -> None
         }
         & device.hass_sensor.keys()
     )
-    assert "action" in device.hass_select
+    assert "action" not in device.hass_select
     assert "box_full_sensitivity" in device.hass_select
     assert "camera_switch_control" in device.hass_select
     assert "pave_level_control" in device.hass_select
@@ -609,7 +608,7 @@ async def test_c07_add_sand_copies_are_sent_with_run_action(
     mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
     mock_operation_feedback(device)
 
-    assert await device.select_action("Add sand: start") is True
+    await device.hass_button["add_sand_start"]["async_press"]()
     mock_coordinator.account.request.assert_awaited_once_with(
         "token/cameraLitterbox/actionCmd/v2",
         {
@@ -651,7 +650,8 @@ async def test_c07_action_error_takes_precedence_over_device_error(
         return_value={"returnCode": 4001, "msg": "not allowed"}
     )
 
-    assert await device.select_action("Clean: start") is False
+    with pytest.raises(HomeAssistantError, match="not allowed"):
+        await device.hass_button["clean_start"]["async_press"]()
     assert device.error == "not allowed (returnCode: 4001)"
 
 
@@ -698,7 +698,7 @@ async def test_c07_update_device_detail_keeps_previous_data_on_failure(
 
     assert await device.update_device_detail() is previous
     assert device.detail is previous
-    assert device.action == "Clean: start"
+    assert device.clean_status == "Cleaning"
 
 
 @pytest.mark.asyncio
@@ -1032,180 +1032,6 @@ async def test_c07_cancel_waits_for_device_idle_feedback(
     assert device.clean_status == "Cancelling cleaning"
     await device.update_device_detail()
     assert device.clean_status == "Idle"
-
-
-@pytest.mark.asyncio
-async def test_c07_action_returns_to_idle_and_can_start_again(
-    hass, mock_coordinator, sample_c07_data
-) -> None:
-    """Publish idle after completion, then send the same start command again."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"online": True, "finalStatus": "", "cleanStatus": "00"}
-    option = {**device.hass_select["action"], "delay_update": None}
-    entity = CatlinkSelectEntity("action", device, option)
-    entity.hass = hass
-    entity.entity_id = "select.c07_action"
-    device.listeners[entity.entity_id] = entity._handle_coordinator_update
-    entity._handle_coordinator_update()
-    assert hass.states.get(entity.entity_id).state == "Idle"
-
-    mock_coordinator.account.request = AsyncMock(
-        side_effect=[
-            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
-            {"returnCode": 0},
-            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
-            {"data": {"deviceInfo": {
-                "online": True, "finalStatus": "", "cleanStatus": "00"
-            }}},
-            {"data": {"deviceInfo": {"online": True, "finalStatus": ""}}},
-            {"returnCode": 0},
-            {"data": {"deviceInfo": {"online": True, "finalStatus": "CLEAN_RUN"}}},
-        ]
-    )
-    assert await entity.async_select_option("Clean: start") is True
-    assert hass.states.get(entity.entity_id).state == "Clean: start"
-
-    await device.update_device_detail()
-    assert entity.current_option == "Idle"
-    assert hass.states.get(entity.entity_id).state == "Idle"
-
-    assert await entity.async_select_option("Clean: start") is True
-    assert hass.states.get(entity.entity_id).state == "Clean: start"
-    commands = [
-        call for call in mock_coordinator.account.request.await_args_list
-        if call.args[0] == "token/cameraLitterbox/actionCmd/v2"
-    ]
-    assert len(commands) == 2
-    for call in commands:
-        assert call.args == (
-            "token/cameraLitterbox/actionCmd/v2",
-            {"deviceId": "c07-device-id", "behavior": "CLEAN", "action": "RUN"},
-            "POST",
-        )
-
-
-@pytest.mark.parametrize(
-    ("final_status", "expected"),
-    [
-        (None, "Idle"),
-        ("", "Idle"),
-        (False, None),
-        (0, None),
-        ({}, None),
-        ([], None),
-        ("CLEAN_RUN", "Clean: start"),
-        ("CLEAN_PAUSE", "Clean: pause"),
-        ("CLEAN_CANCEL", "Clean: cancel"),
-        ("PAVE_RUN", "Pave: start"),
-        ("EMPTY_RUN", "Empty: start"),
-        ("ADD_SAND_RUN", "Add sand: start"),
-        ("ADD_SAND_PAUSE", "Add sand: pause"),
-        ("ADD_SAND_CANCEL", "Add sand: cancel"),
-        ("UNRECOGNIZED_STATUS", None),
-    ],
-)
-def test_c07_action_follows_device_status(
-    mock_coordinator, sample_c07_data, final_status, expected
-) -> None:
-    """Use device feedback rather than a cached command, including add-sand."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"finalStatus": final_status}
-    assert device.action == expected
-    assert expected is None or expected in device.hass_select["action"]["options"]
-
-
-def test_c07_missing_action_feedback_is_unknown(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """A partial response does not prove that the device has completed a task."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"online": True}
-    assert device.action is None
-
-
-@pytest.mark.asyncio
-async def test_c07_idle_selection_does_not_send_a_command(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """The idle display option must never cancel or restart an operation."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"finalStatus": "CLEAN_RUN"}
-    mock_coordinator.account.request = AsyncMock()
-    assert await device.select_action("Idle") is True
-    mock_coordinator.account.request.assert_not_awaited()
-    assert device.action == "Clean: start"
-
-
-@pytest.mark.asyncio
-async def test_c07_clean_action_uses_existing_action_select_pattern(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """Start cleaning through the C07 action command endpoint."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    mock_operation_feedback(device)
-
-    assert await device.select_action("Clean: start") is True
-    mock_coordinator.account.request.assert_awaited_once_with(
-        "token/cameraLitterbox/actionCmd/v2",
-        {"deviceId": "c07-device-id", "behavior": "CLEAN", "action": "RUN"},
-        "POST",
-    )
-    assert device.update_device_detail.await_count == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("label", "behavior", "action"),
-    [
-        ("Clean: start", "CLEAN", "RUN"),
-        ("Clean: pause", "CLEAN", "PAUSE"),
-        ("Clean: cancel", "CLEAN", "CANCEL"),
-        ("Pave: start", "PAVE", "RUN"),
-        ("Pave: pause", "PAVE", "PAUSE"),
-        ("Pave: cancel", "PAVE", "CANCEL"),
-        ("Empty: start", "EMPTY", "RUN"),
-        ("Empty: pause", "EMPTY", "PAUSE"),
-        ("Empty: cancel", "EMPTY", "CANCEL"),
-        ("Add sand: start", "ADD_SAND", "RUN"),
-        ("Add sand: pause", "ADD_SAND", "PAUSE"),
-        ("Add sand: cancel", "ADD_SAND", "CANCEL"),
-    ],
-)
-async def test_c07_clean_action_variants(
-    mock_coordinator, sample_c07_data, label, behavior, action
-) -> None:
-    """Use the existing action select shape for pause and cancel."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    mock_operation_feedback(device, "" if action == "RUN" else f"{behavior}_RUN")
-
-    assert await device.select_action(label) is True
-    expected_payload = {
-        "deviceId": "c07-device-id",
-        "behavior": behavior,
-        "action": action,
-    }
-    if behavior == "ADD_SAND" and action == "RUN":
-        expected_payload["copies"] = "1"
-    mock_coordinator.account.request.assert_awaited_once_with(
-        "token/cameraLitterbox/actionCmd/v2",
-        expected_payload,
-        "POST",
-    )
-
-
-@pytest.mark.asyncio
-async def test_c07_action_error_is_reported(mock_coordinator, sample_c07_data) -> None:
-    """Expose API action failures through the existing action-error path."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_operation_feedback(device)
-    mock_coordinator.account.request = AsyncMock(
-        return_value={"returnCode": 4001, "msg": "not allowed"}
-    )
-
-    assert await device.select_action("Clean: start") is False
-    assert device.error == "not allowed (returnCode: 4001)"
 
 
 @pytest.mark.asyncio

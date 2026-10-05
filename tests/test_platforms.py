@@ -18,6 +18,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_DEVICES
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 
 @pytest.fixture
@@ -100,6 +101,59 @@ async def test_platforms_loaded(init_integration: MockConfigEntry) -> None:
             "number",
             "image",
         ]
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+@pytest.mark.parametrize("renamed", [False, True])
+@pytest.mark.parametrize("disabled_by", [None, er.RegistryEntryDisabler.USER])
+async def test_reload_removes_only_obsolete_c07_action(
+    hass: HomeAssistant, init_integration: MockConfigEntry, renamed, disabled_by
+) -> None:
+    """Reload removes enabled/disabled/renamed legacy selects without collateral loss."""
+    registry = er.async_get(hass)
+    obsolete = registry.async_get_or_create(
+        "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-action",
+        config_entry=init_integration, disabled_by=disabled_by,
+        suggested_object_id="old_c07_action",
+    )
+    if renamed:
+        obsolete = registry.async_update_entity(
+            obsolete.entity_id, new_entity_id="select.my_renamed_operation_control"
+        )
+
+    other_account = MockConfigEntry(domain=DOMAIN, unique_id="other-account")
+    other_account.add_to_hass(hass)
+    retained = [
+        registry.async_get_or_create(
+            "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-camera_switch_control",
+            config_entry=init_integration,
+        ),
+        registry.async_get_or_create(
+            "select", DOMAIN, "LITTER_BOX_599_AA:BB:CC:DD:EE:08-action",
+            config_entry=init_integration,
+        ),
+        registry.async_get_or_create(
+            "button", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-operation_cancel",
+            config_entry=init_integration,
+        ),
+        registry.async_get_or_create(
+            "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:09-action",
+            config_entry=other_account,
+        ),
+        registry.async_get_or_create(
+            "select", "other_platform", "VISUAL_C07_AA:BB:CC:DD:EE:07-action",
+            config_entry=init_integration,
+        ),
+    ]
+
+    for _ in range(2):
+        assert await hass.config_entries.async_reload(init_integration.entry_id)
+        await hass.async_block_till_done()
+        assert registry.async_get(obsolete.entity_id) is None
+        assert registry.async_get_entity_id(
+            "select", DOMAIN, obsolete.unique_id
+        ) is None
+        assert all(registry.async_get(entity.entity_id) is not None for entity in retained)
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

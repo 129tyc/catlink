@@ -215,10 +215,10 @@ The existing `clean_status` sensor is displayed as Operation status and reports
 actual device feedback. Cancellation remains Cancelling until the device
 reports idle; command acceptance alone does not mark an operation completed.
 
-The action select is retained for existing automations, but defaults to disabled
-when newly registered. Existing enabled entities remain enabled. It uses the
-same validation as the buttons and follows `finalStatus`, returning to `Idle`
-after the device confirms completion. Selecting `Idle` sends no command.
+The former C07 action select is removed. On integration setup, its old entity
+registry record is removed even if disabled or renamed. Automations that used
+`select.select_option` on that entity must switch to the corresponding
+`button.press` action. Other device models and C07 settings selects are unchanged.
 
 #### Cats
 
