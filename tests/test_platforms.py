@@ -104,15 +104,16 @@ async def test_platforms_loaded(init_integration: MockConfigEntry) -> None:
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
+@pytest.mark.parametrize("obsolete_key", ["action", "camera_switch_control"])
 @pytest.mark.parametrize("renamed", [False, True])
 @pytest.mark.parametrize("disabled_by", [None, er.RegistryEntryDisabler.USER])
 async def test_reload_removes_only_obsolete_c07_action(
-    hass: HomeAssistant, init_integration: MockConfigEntry, renamed, disabled_by
+    hass: HomeAssistant, init_integration: MockConfigEntry, obsolete_key, renamed, disabled_by
 ) -> None:
     """Reload removes enabled/disabled/renamed legacy selects without collateral loss."""
     registry = er.async_get(hass)
     obsolete = registry.async_get_or_create(
-        "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-action",
+        "select", DOMAIN, f"VISUAL_C07_AA:BB:CC:DD:EE:07-{obsolete_key}",
         config_entry=init_integration, disabled_by=disabled_by,
         suggested_object_id="old_c07_action",
     )
@@ -125,7 +126,7 @@ async def test_reload_removes_only_obsolete_c07_action(
     other_account.add_to_hass(hass)
     retained = [
         registry.async_get_or_create(
-            "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-camera_switch_control",
+            "select", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-box_full_sensitivity",
             config_entry=init_integration,
         ),
         registry.async_get_or_create(
@@ -134,6 +135,14 @@ async def test_reload_removes_only_obsolete_c07_action(
         ),
         registry.async_get_or_create(
             "button", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-operation_cancel",
+            config_entry=init_integration,
+        ),
+        registry.async_get_or_create(
+            "switch", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-interior_camera",
+            config_entry=init_integration,
+        ),
+        registry.async_get_or_create(
+            "switch", DOMAIN, "VISUAL_C07_AA:BB:CC:DD:EE:07-exterior_camera",
             config_entry=init_integration,
         ),
         registry.async_get_or_create(

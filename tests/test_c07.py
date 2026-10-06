@@ -9,7 +9,9 @@ import pytest
 from custom_components.catlink.devices.c07 import C07Device
 from custom_components.catlink.devices.registry import DEVICE_TYPES
 from custom_components.catlink.entities.button import CatlinkButtonEntity
+from custom_components.catlink.entities.switch import CatlinkSwitchEntity
 from homeassistant.components.button import DATA_COMPONENT as BUTTON_COMPONENT
+from homeassistant.components.switch import DATA_COMPONENT as SWITCH_COMPONENT
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.setup import async_setup_component
@@ -92,7 +94,8 @@ def test_c07_state_and_garbage_fields(mock_coordinator, sample_c07_data) -> None
     )
     assert "action" not in device.hass_select
     assert "box_full_sensitivity" in device.hass_select
-    assert "camera_switch_control" in device.hass_select
+    assert "camera_switch_control" not in device.hass_select
+    assert {"interior_camera", "exterior_camera"} <= device.hass_switch.keys()
     assert "pave_level_control" in device.hass_select
     assert "litter_type_control" in device.hass_select
     assert "safe_time_control" in device.hass_select
@@ -343,46 +346,66 @@ def test_c07_camera_switch_mapping(
     assert device.state_attrs()["raw_camera_switch"] == raw_switch
 
 
+def mock_camera_feedback(device, raw="00", online=True):
+    """Supply fresh device camera feedback, independently of command acceptance."""
+    async def refresh():
+        device.detail = {**device.detail, "online": online, "cameraSwitch": raw}
+        device._handle_listeners()
+        return device.detail
+    device.update_device_detail = AsyncMock(side_effect=refresh)
+
+
+@pytest.mark.parametrize(
+    ("raw", "interior", "exterior"),
+    [("00", False, False), ("01", True, False), ("10", False, True),
+     ("11", True, True), (None, None, None), ("", None, None),
+     ("bad", None, None), (0, None, None), (False, None, None)],
+)
+def test_c07_individual_camera_feedback(mock_coordinator, sample_c07_data, raw, interior, exterior):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"cameraSwitch": raw}
+    assert device.interior_camera is interior
+    assert device.exterior_camera is exterior
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("label", "camera_switch"),
-    [
-        ("Off", "00"),
-        ("Interior camera", "01"),
-        ("Exterior camera", "10"),
-        ("Both cameras", "11"),
-    ],
+    ("raw", "camera", "enable", "target"),
+    [("00", "interior_camera", True, "01"),
+     ("10", "interior_camera", True, "11"),
+     ("11", "interior_camera", False, "10"),
+     ("01", "interior_camera", False, "00"),
+     ("00", "exterior_camera", True, "10"),
+     ("01", "exterior_camera", True, "11"),
+     ("11", "exterior_camera", False, "01"),
+     ("10", "exterior_camera", False, "00")],
 )
-async def test_c07_camera_switch_control_uses_camera_switch_endpoint(
-    mock_coordinator, sample_c07_data, label, camera_switch
-) -> None:
-    """Control each C07 camera channel combination using the APK endpoint."""
+async def test_c07_camera_switch_preserves_other_channel(
+    mock_coordinator, sample_c07_data, raw, camera, enable, target
+):
     device = C07Device(sample_c07_data, mock_coordinator)
+    # Deliberately stale local state must not choose the other camera's bit.
+    device.detail = {"online": True, "cameraSwitch": "11" if raw != "11" else "00"}
+    mock_camera_feedback(device, raw)
     mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
-    device.update_device_detail = AsyncMock(return_value={})
-
-    assert await device.select_camera_switch(label) is True
+    callback = device.hass_switch[camera]["async_turn_on" if enable else "async_turn_off"]
+    assert await callback() is True
     mock_coordinator.account.request.assert_awaited_once_with(
         "token/cameraLitterbox/cameraSwitch",
-        {"deviceId": "c07-device-id", "cameraSwitch": camera_switch},
-        "POST",
+        {"deviceId": device.id, "cameraSwitch": target}, "POST"
     )
-    device.update_device_detail.assert_awaited_once_with()
+    assert device.update_device_detail.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_c07_camera_switch_control_skips_matching_state(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """Do not re-send a camera setting that already matches the detail state."""
+@pytest.mark.parametrize("camera", ["interior_camera", "exterior_camera"])
+async def test_c07_camera_switch_skips_matching_fresh_state(mock_coordinator, sample_c07_data, camera):
     device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"cameraSwitch": "11"}
+    mock_camera_feedback(device, "11")
     mock_coordinator.account.request = AsyncMock()
-    device.update_device_detail = AsyncMock()
-
-    assert await device.select_camera_switch("Both cameras") is True
+    assert await device.hass_switch[camera]["async_turn_on"]() is True
     mock_coordinator.account.request.assert_not_awaited()
-    device.update_device_detail.assert_not_awaited()
+    device.update_device_detail.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -401,77 +424,187 @@ async def test_c07_switch_control_skips_matching_state(
 
 
 @pytest.mark.asyncio
-async def test_c07_camera_switch_control_rejects_invalid_option(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """Do not send unsupported camera switch values to the API."""
+@pytest.mark.parametrize("raw", [None, "bad", "", 0, False, {}, []])
+async def test_c07_unknown_camera_feedback_rejects_write(mock_coordinator, sample_c07_data, raw):
     device = C07Device(sample_c07_data, mock_coordinator)
+    mock_camera_feedback(device, raw)
     mock_coordinator.account.request = AsyncMock()
-
-    assert await device.select_camera_switch("Invalid camera") is False
+    with pytest.raises(HomeAssistantError, match="unknown"):
+        await device.hass_switch["interior_camera"]["async_turn_on"]()
     mock_coordinator.account.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "response",
-    [
-        {},
-        {"returnCode": 4001, "msg": "not allowed"},
-    ],
-)
-async def test_c07_camera_switch_control_failure_skips_refresh(
-    mock_coordinator, sample_c07_data, response
-) -> None:
-    """Report camera switch failures without refreshing stale state."""
+@pytest.mark.parametrize("response", [{}, {"returnCode": 4001, "msg": "not allowed"},
+    {"msg": "accepted"}, {"returnCode": False}, {"returnCode": 0.0}])
+async def test_c07_camera_switch_failure_skips_post_refresh(mock_coordinator, sample_c07_data, response):
     device = C07Device(sample_c07_data, mock_coordinator)
+    mock_camera_feedback(device)
     mock_coordinator.account.request = AsyncMock(return_value=response)
-    device.update_device_detail = AsyncMock(return_value={})
-
-    assert await device.select_camera_switch("Both cameras") is False
-    device.update_device_detail.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_c07_missing_return_code_is_failure(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """Do not treat a malformed response without returnCode as success."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_coordinator.account.request = AsyncMock(return_value={"msg": "accepted"})
-    device.update_device_detail = AsyncMock(return_value={})
-
-    assert await device.select_camera_switch("Both cameras") is False
-    device.update_device_detail.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("return_code", [False, 0.0])
-async def test_c07_non_integer_zero_return_code_is_failure(
-    mock_coordinator, sample_c07_data, return_code
-) -> None:
-    """Do not accept boolean or float zero as a numeric API success code."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_coordinator.account.request = AsyncMock(
-        return_value={"returnCode": return_code}
-    )
-    device.update_device_detail = AsyncMock(return_value={})
-
-    assert await device.select_camera_switch("Both cameras") is False
-    device.update_device_detail.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_c07_string_zero_return_code_is_success(
-    mock_coordinator, sample_c07_data
-) -> None:
-    """Accept the string zero form used by some API responses."""
-    device = C07Device(sample_c07_data, mock_coordinator)
-    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": "0"})
-    device.update_device_detail = AsyncMock(return_value={})
-
-    assert await device.select_camera_switch("Both cameras") is True
+    with pytest.raises(HomeAssistantError):
+        await device.hass_switch["interior_camera"]["async_turn_on"]()
+    # The preflight read happened, but failed commands do not refresh afterwards.
     device.update_device_detail.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_c07_camera_switch_accepts_string_zero(mock_coordinator, sample_c07_data):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_camera_feedback(device)
+    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": "0"})
+    assert await device.hass_switch["interior_camera"]["async_turn_on"]() is True
+    assert device.update_device_detail.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_c07_camera_switch_uses_feedback_not_optimistic_command(hass, mock_coordinator, sample_c07_data):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_camera_feedback(device)
+    mock_coordinator.account.request = AsyncMock(return_value={"returnCode": 0})
+    entity = CatlinkSwitchEntity("interior_camera", device, device.hass_switch["interior_camera"])
+    entity.hass = hass
+    entity.entity_id = "switch.c07_test_interior_camera"
+    device.listeners[entity.entity_id] = entity._handle_coordinator_update
+    entity._handle_coordinator_update()
+    assert await entity.async_turn_on() is True
+    # Success without changed camera feedback is not proof that the camera is on.
+    assert hass.states.get(entity.entity_id).state == "off"
+    mock_camera_feedback(device, "01")
+    await device.update_device_detail()
+    assert hass.states.get(entity.entity_id).state == "on"
+    device.detail = {"online": True}
+    entity._handle_coordinator_update()
+    assert hass.states.get(entity.entity_id).state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_c07_camera_switches_through_ha_services(
+    hass, mock_coordinator, sample_c07_data
+):
+    """Native HA switch services publish both independent camera states."""
+    coordinator = DataUpdateCoordinator(
+        hass, logging.getLogger(__name__), name="c07-camera-test", config_entry=None
+    )
+    coordinator.account = mock_coordinator.account
+    device = C07Device(sample_c07_data, coordinator)
+    device.detail = {"online": True, "cameraSwitch": "00"}
+    interior = CatlinkSwitchEntity(
+        "interior_camera", device, device.hass_switch["interior_camera"]
+    )
+    exterior = CatlinkSwitchEntity(
+        "exterior_camera", device, device.hass_switch["exterior_camera"]
+    )
+    assert await async_setup_component(hass, "switch", {})
+    await hass.data[SWITCH_COMPONENT].async_add_entities([interior, exterior])
+    await hass.async_block_till_done()
+    remote_mask = "00"
+
+    async def request(endpoint, params, method="GET"):
+        nonlocal remote_mask
+        if endpoint == "token/cameraLitterbox/info":
+            return {"data": {"deviceInfo": {
+                "online": True, "cameraSwitch": remote_mask
+            }}}
+        remote_mask = params["cameraSwitch"]
+        return {"returnCode": 0}
+
+    mock_coordinator.account.request = AsyncMock(side_effect=request)
+    for entity, service, expected in (
+        (interior, "turn_on", ("on", "off")),
+        (exterior, "turn_on", ("on", "on")),
+        (interior, "turn_off", ("off", "on")),
+        (exterior, "turn_off", ("off", "off")),
+    ):
+        await hass.services.async_call(
+            "switch", service, {"entity_id": entity.entity_id}, blocking=True
+        )
+        assert (
+            hass.states.get(interior.entity_id).state,
+            hass.states.get(exterior.entity_id).state,
+        ) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("online", [False, True])
+async def test_c07_camera_switch_rejects_missing_or_offline_feedback(
+    mock_coordinator, sample_c07_data, online
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"online": True, "cameraSwitch": "11"}
+    response = (
+        {"returnCode": 1003, "data": {}} if online else
+        {"data": {"deviceInfo": {"online": False, "cameraSwitch": "11"}}}
+    )
+    mock_coordinator.account.request = AsyncMock(return_value=response)
+    with pytest.raises(HomeAssistantError):
+        await device.hass_switch["interior_camera"]["async_turn_off"]()
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/info", {"deviceId": device.id}
+    )
+
+
+@pytest.mark.asyncio
+async def test_c07_delayed_camera_feedback_cannot_undo_other_camera(
+    mock_coordinator, sample_c07_data
+):
+    """Block another compound write until the previous accepted mask is observed."""
+    device = C07Device(sample_c07_data, mock_coordinator)
+    feedback = "00"
+    writes = []
+
+    async def request(endpoint, params, method="GET"):
+        await asyncio.sleep(0)
+        if endpoint == "token/cameraLitterbox/info":
+            return {"data": {"deviceInfo": {
+                "online": True, "cameraSwitch": feedback
+            }}}
+        writes.append(params["cameraSwitch"])
+        # The API accepts the setting, but its read endpoint remains behind.
+        return {"returnCode": 0}
+
+    mock_coordinator.account.request = AsyncMock(side_effect=request)
+    results = await asyncio.gather(
+        device.hass_switch["interior_camera"]["async_turn_on"](),
+        device.hass_switch["exterior_camera"]["async_turn_on"](),
+        return_exceptions=True,
+    )
+    assert results[0] is True
+    assert isinstance(results[1], HomeAssistantError)
+    assert "awaiting device confirmation" in str(results[1])
+    assert writes == ["01"]  # Never POST stale 10, which would disable interior.
+    assert device.interior_camera is False and device.exterior_camera is False
+
+    # A normal device poll confirms the first write and releases the gate.
+    feedback = "01"
+    await device.update_device_detail()
+    assert await device.hass_switch["exterior_camera"]["async_turn_on"]() is True
+    assert writes == ["01", "11"]
+    assert device.interior_camera is True and device.exterior_camera is False
+    feedback = "11"
+    await device.update_device_detail()
+    assert device.interior_camera is True and device.exterior_camera is True
+
+
+@pytest.mark.asyncio
+async def test_c07_simultaneous_camera_switches_preserve_both_bits(mock_coordinator, sample_c07_data):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    remote_mask = "00"
+    writes = []
+    async def request(endpoint, params, method="GET"):
+        nonlocal remote_mask
+        await asyncio.sleep(0)
+        if endpoint == "token/cameraLitterbox/info":
+            return {"data": {"deviceInfo": {"online": True, "cameraSwitch": remote_mask}}}
+        remote_mask = params["cameraSwitch"]
+        writes.append(remote_mask)
+        return {"returnCode": 0}
+    mock_coordinator.account.request = AsyncMock(side_effect=request)
+    await asyncio.gather(
+        device.hass_switch["interior_camera"]["async_turn_on"](),
+        device.hass_switch["exterior_camera"]["async_turn_on"](),
+    )
+    assert writes == ["01", "11"]
+    assert device.interior_camera is True and device.exterior_camera is True
 
 
 @pytest.mark.asyncio

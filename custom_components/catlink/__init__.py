@@ -50,10 +50,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             registered.domain == "select"
             and registered.platform == DOMAIN
             and registered.unique_id.startswith("VISUAL_C07_")
-            and registered.unique_id.endswith("-action")
+            and registered.unique_id.endswith(("-action", "-camera_switch_control"))
         ):
             registry.async_remove(registered.entity_id)
-            _LOGGER.info("Removed obsolete C07 action entity %s", registered.entity_id)
+            _LOGGER.info("Removed obsolete C07 control entity %s", registered.entity_id)
 
     hass.data[DOMAIN][CONF_ACCOUNTS][acc.uid] = acc
     hass.data[DOMAIN]["coordinators"][coordinator.name] = coordinator

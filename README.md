@@ -218,7 +218,15 @@ reports idle; command acceptance alone does not mark an operation completed.
 The former C07 action select is removed. On integration setup, its old entity
 registry record is removed even if disabled or renamed. Automations that used
 `select.select_option` on that entity must switch to the corresponding
-`button.press` action. Other device models and C07 settings selects are unchanged.
+`button.press` action. Other device models are unchanged.
+
+C07 camera settings use two independent switches, `interior_camera` and
+`exterior_camera`. Each reads the current two-bit `cameraSwitch` setting before
+changing only its own bit. Writes are serialized; an accepted change must be
+observed in device feedback before another camera setting can be written.
+Displayed switch states follow feedback rather than command acceptance. Unknown camera feedback
+is shown as unknown and cannot be modified. The former `camera_switch_control`
+select is removed from the current account's entity registry during setup.
 
 #### Cats
 

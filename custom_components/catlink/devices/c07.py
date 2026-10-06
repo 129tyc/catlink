@@ -115,6 +115,8 @@ class C07Device(LitterDevice):
         """Initialize the C07 device."""
         super().__init__(dat, coordinator, additional_config)
         self._operation_lock = asyncio.Lock()
+        self._camera_lock = asyncio.Lock()
+        self._camera_unconfirmed_target: str | None = None
         self._add_sand_copies = 1
         self.event_coordinator: DataUpdateCoordinator | None = None
         self.event_data = empty_event_data()
@@ -412,9 +414,21 @@ class C07Device(LitterDevice):
         return _CAMERA_SWITCH_LABELS.get(raw, raw or "Unknown")
 
     @property
-    def camera_switch_control(self) -> str:
-        """Return the current value of the camera switch select."""
-        return self.camera_switch
+    def interior_camera(self) -> bool | None:
+        """Return the interior camera bit, or unknown for invalid feedback."""
+        raw = self._camera_bits()
+        return raw[1] == "1" if raw is not None else None
+
+    @property
+    def exterior_camera(self) -> bool | None:
+        """Return the exterior camera bit, or unknown for invalid feedback."""
+        raw = self._camera_bits()
+        return raw[0] == "1" if raw is not None else None
+
+    def _camera_bits(self) -> str | None:
+        """Read only the exact two-bit camera setting reported by the device."""
+        raw = self.detail.get("cameraSwitch")
+        return raw if isinstance(raw, str) and raw in _CAMERA_SWITCH_LABELS else None
 
     @property
     def garbage_full(self) -> bool:
@@ -541,6 +555,20 @@ class C07Device(LitterDevice):
     def hass_switch(self) -> dict:
         """Return C07 configuration switches using the existing pattern."""
         return {
+            "interior_camera": {
+                "name": "Interior camera",
+                "icon": "mdi:camera",
+                "optimistic": False,
+                "async_turn_on": partial(self.async_set_camera, 1, True),
+                "async_turn_off": partial(self.async_set_camera, 1, False),
+            },
+            "exterior_camera": {
+                "name": "Exterior camera",
+                "icon": "mdi:camera-outline",
+                "optimistic": False,
+                "async_turn_on": partial(self.async_set_camera, 0, True),
+                "async_turn_off": partial(self.async_set_camera, 0, False),
+            },
             "auto_clean": {
                 "icon": "mdi:robot",
                 "async_turn_on": partial(self.async_set_auto_clean, True),
@@ -625,12 +653,6 @@ class C07Device(LitterDevice):
                 "options": list(self.box_full_levels.values()),
                 "state_attrs": self.box_full_sensitivity_attrs,
                 "async_select": self.select_box_full_sensitivity,
-            },
-            "camera_switch_control": {
-                "icon": "mdi:camera-switch",
-                "options": list(_CAMERA_SWITCH_LABELS.values()),
-                "state_attrs": self.camera_switch_attrs,
-                "async_select": self.select_camera_switch,
             },
             "pave_level_control": {
                 "icon": "mdi:tune",
@@ -772,10 +794,6 @@ class C07Device(LitterDevice):
         """Return the raw box-full sensitivity value."""
         return {"raw_level": self.detail.get("boxFullSensitivity")}
 
-    def camera_switch_attrs(self) -> dict:
-        """Return the raw camera-switch value."""
-        return {"raw_camera_switch": self.detail.get("cameraSwitch")}
-
     def pave_level_attrs(self) -> dict:
         """Return the raw paving-level value."""
         return {"raw_level": self.detail.get("sandPaveLevel")}
@@ -814,6 +832,11 @@ class C07Device(LitterDevice):
             )
             return previous
         self.detail = rdt
+        if (
+            self._camera_unconfirmed_target is not None
+            and rdt.get("cameraSwitch") == self._camera_unconfirmed_target
+        ):
+            self._camera_unconfirmed_target = None
         self._action_error = None
         self._handle_listeners()
         return rdt
@@ -978,31 +1001,50 @@ class C07Device(LitterDevice):
             response, "Select C07 box-full sensitivity"
         )
 
-    async def select_camera_switch(self, value, **kwargs) -> bool:
-        """Select which C07 camera channels are enabled."""
-        camera_switch = next(
-            (code for code, label in _CAMERA_SWITCH_LABELS.items() if label == value),
-            None,
-        )
-        if camera_switch is None:
-            _LOGGER.warning("Select C07 camera switch failed for %s", value)
-            return False
-        if self.camera_switch == value:
+    async def async_set_camera(self, bit: int, enable: bool, **kwargs) -> bool:
+        """Change one camera without overwriting the other camera's setting."""
+        async with self._camera_lock:
+            previous = self.detail
+            detail = await self.update_device_detail()
+            if detail is previous:
+                raise HomeAssistantError("Unable to refresh C07 camera settings")
+            if not self._flag(detail.get("online")):
+                raise HomeAssistantError("C07 device is offline")
+            raw = self._camera_bits()
+            if raw is None:
+                raise HomeAssistantError("C07 camera settings are unknown")
+            if self._camera_unconfirmed_target is not None:
+                raise HomeAssistantError(
+                    "Previous C07 camera change is awaiting device confirmation"
+                )
+            bits = list(raw)
+            bits[bit] = "1" if enable else "0"
+            target = "".join(bits)
+            if target == raw:
+                return True
+            response = await self.account.request(
+                API_C07_CAMERA_SWITCH,
+                {"deviceId": self.id, "cameraSwitch": target},
+                "POST",
+            )
+            if self._action_response_succeeded(response):
+                # This gates further writes only; it is never displayed as state.
+                self._camera_unconfirmed_target = target
+            if not await self._handle_action_response(response, "Set C07 camera"):
+                raise HomeAssistantError(self.error)
             return True
-        response = await self.account.request(
-            API_C07_CAMERA_SWITCH,
-            {"deviceId": self.id, "cameraSwitch": camera_switch},
-            "POST",
+
+    @staticmethod
+    def _action_response_succeeded(response: dict) -> bool:
+        """Recognize only the API's documented integer or string zero codes."""
+        return_code = response.get("returnCode") if response else None
+        return (type(return_code) is int and return_code == 0) or (
+            type(return_code) is str and return_code == "0"
         )
-        return await self._handle_action_response(response, "Select C07 camera switch")
 
     async def _handle_action_response(self, response: dict, action_name: str) -> bool:
         """Handle a C07 command response and refresh the device state."""
-        return_code = response.get("returnCode") if response else None
-        success = (type(return_code) is int and return_code == 0) or (
-            type(return_code) is str and return_code == "0"
-        )
-        if not response or not success:
+        if not self._action_response_succeeded(response):
             error = format_api_error(response) if response else "Request failed"
             _LOGGER.error("%s failed: %s", action_name, error)
             self._set_action_error(error)

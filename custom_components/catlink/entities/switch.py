@@ -15,7 +15,7 @@ class CatlinkSwitchEntity(CatlinkBinaryEntity, SwitchEntity):
         if callable(fun):
             kwargs["entity"] = self
             ret = await fun(**kwargs)
-        if ret:
+        if ret and self._option.get("optimistic", True):
             self._attr_is_on = bool(on)
         await self._async_after_action(bool(ret), self._option.get("delay_update"))
         return ret
