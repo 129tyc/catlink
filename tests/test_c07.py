@@ -9,8 +9,14 @@ import pytest
 from custom_components.catlink.devices.c07 import C07Device
 from custom_components.catlink.devices.registry import DEVICE_TYPES
 from custom_components.catlink.entities.button import CatlinkButtonEntity
+from custom_components.catlink.entities.binary import CatlinkBinarySensorEntity
+from custom_components.catlink.entities.sensor import CatlinkSensorEntity
 from custom_components.catlink.entities.switch import CatlinkSwitchEntity
+from homeassistant.components.binary_sensor import (
+    DATA_COMPONENT as BINARY_SENSOR_COMPONENT,
+)
 from homeassistant.components.button import DATA_COMPONENT as BUTTON_COMPONENT
+from homeassistant.components.sensor import DATA_COMPONENT as SENSOR_COMPONENT
 from homeassistant.components.switch import DATA_COMPONENT as SWITCH_COMPONENT
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -258,10 +264,82 @@ def test_c07_balance_falls_back_to_full_for_other_numeric_values(
 ) -> None:
     """Follow the APK rule that balances other than 1/2 mean full."""
     device = C07Device(sample_c07_data, mock_coordinator)
-    device.detail = {"catLitterBalance": 0, "sandboxBalance": 3}
+    device.detail = {
+        "catLitterBalance": 0,
+        "sandboxBalance": 3,
+        "sandBoxInstall": True,
+    }
 
     assert device.cat_litter_balance == "Full"
     assert device.sandbox_balance == "Full"
+
+
+@pytest.mark.asyncio
+async def test_c07_sandbox_balance_availability_through_ha(
+    hass, mock_coordinator, sample_c07_data
+):
+    """Publish accessory installation and balance transitions to HA states."""
+    coordinator = DataUpdateCoordinator(
+        hass, logging.getLogger(__name__), name="c07-sandbox-test", config_entry=None
+    )
+    coordinator.account = mock_coordinator.account
+    device = C07Device(sample_c07_data, coordinator)
+    device.detail = {
+        "sandBoxInstall": False,
+        "sandboxBalance": 0,
+        "catLitterBalance": 2,
+    }
+    balance = CatlinkSensorEntity(
+        "sandbox_balance", device, device.hass_sensor["sandbox_balance"]
+    )
+    litter = CatlinkSensorEntity(
+        "cat_litter_balance", device, device.hass_sensor["cat_litter_balance"]
+    )
+    installed = CatlinkBinarySensorEntity(
+        "sandbox_installed", device, device.hass_binary_sensor["sandbox_installed"]
+    )
+
+    await async_setup_component(hass, "sensor", {})
+    await async_setup_component(hass, "binary_sensor", {})
+    await hass.data[SENSOR_COMPONENT].async_add_entities([balance, litter])
+    await hass.data[BINARY_SENSOR_COMPONENT].async_add_entities([installed])
+
+    unique_id = balance.unique_id
+    for detail, expected_balance, expected_installed in [
+        ({"sandBoxInstall": False, "sandboxBalance": 0}, "unavailable", "off"),
+        ({"sandBoxInstall": True, "sandboxBalance": 0}, "Full", "on"),
+        ({"sandBoxInstall": "01", "sandboxBalance": "1"}, "Low", "on"),
+        ({"sandBoxInstall": 1, "sandboxBalance": 2}, "Medium", "on"),
+        ({"sandBoxInstall": True, "sandboxBalance": 3}, "Full", "on"),
+        ({"sandBoxInstall": True}, "unknown", "on"),
+        (
+            {"sandBoxInstall": True, "sandboxBalance": "invalid"},
+            "unknown",
+            "on",
+        ),
+        ({"sandBoxInstall": "00", "sandboxBalance": 3}, "unavailable", "off"),
+        ({"sandboxBalance": 0}, "unavailable", "off"),
+        ({"sandBoxInstall": True, "sandboxBalance": 2}, "Medium", "on"),
+    ]:
+        device.detail = {**detail, "catLitterBalance": 2}
+        for entity in (balance, litter, installed):
+            entity._handle_coordinator_update()
+        assert hass.states.get(balance.entity_id).state == expected_balance
+        assert hass.states.get(installed.entity_id).state == expected_installed
+        assert hass.states.get(litter.entity_id).state == "Medium"
+        assert balance.unique_id == unique_id
+        # Preserve the API's raw value for diagnostics even when not installed.
+        assert device.state_attrs()["sandbox_balance"] == detail.get("sandboxBalance")
+
+    coordinator.last_update_success = False
+    for entity in (balance, litter):
+        entity._handle_coordinator_update()
+        assert hass.states.get(entity.entity_id).state == "unavailable"
+
+    coordinator.last_update_success = True
+    for entity in (balance, litter):
+        entity._handle_coordinator_update()
+        assert hass.states.get(entity.entity_id).state == "Medium"
 
 
 def test_c07_add_sand_copies_are_limited_to_apk_range(

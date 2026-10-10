@@ -231,10 +231,12 @@ class C07Device(LitterDevice):
         return _BALANCE_LABELS.get(raw, "Full" if raw is not None else "Unknown")
 
     @property
-    def sandbox_balance(self) -> str:
-        """Return the App-aligned sandbox balance label."""
+    def sandbox_balance(self) -> str | None:
+        """Return sandbox material balance only when the accessory is installed."""
+        if not self.sandbox_installed:
+            return None
         raw = self._number(self.detail.get("sandboxBalance"), integer=True)
-        return _BALANCE_LABELS.get(raw, "Full" if raw is not None else "Unknown")
+        return _BALANCE_LABELS.get(raw, "Full") if raw is not None else None
 
     @property
     def sandbox_installed(self) -> bool:
@@ -509,7 +511,10 @@ class C07Device(LitterDevice):
             "clear_time": {"icon": "mdi:delete-sweep", "unit": "times"},
             "full_time": {"icon": "mdi:delete-alert", "unit": "times"},
             "cat_litter_balance": {"icon": "mdi:shaker-outline"},
-            "sandbox_balance": {"icon": "mdi:shaker"},
+            "sandbox_balance": {
+                "icon": "mdi:shaker",
+                "available": lambda: self.sandbox_installed,
+            },
             "litter_remaining_days": {"icon": "mdi:calendar", "unit": "days"},
             "deodorant_countdown": {"icon": "mdi:timer", "unit": "days"},
             "total_clean_time": {"icon": "mdi:history", "unit": "times"},
