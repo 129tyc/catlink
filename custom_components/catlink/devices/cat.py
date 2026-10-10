@@ -13,10 +13,11 @@ if TYPE_CHECKING:
     from custom_components.catlink.modules.devices_coordinator import DevicesCoordinator
 
 
+# CATLINK app GenderUtils: 1/2 are male, 3/4 are female; 2/4 are neutered.
 GENDER_LABELS: dict[int, str] = {
     1: "Male",
-    2: "Female",
-    3: "Neutered male",
+    2: "Neutered male",
+    3: "Female",
     4: "Neutered female",
 }
 

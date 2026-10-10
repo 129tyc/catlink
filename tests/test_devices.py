@@ -107,7 +107,7 @@ def sample_cat_data():
         "deviceType": "CAT",
         "mac": "cat-169004",
         "model": "STREET CAT",
-        "gender": 3,
+        "gender": 2,
         "weight": 4.7,
         "summary_simple": {
             "statusDescription": "Data collection in progress",
@@ -117,6 +117,25 @@ def sample_cat_data():
             "sport": {"activeDuration": 12},
         },
     }
+
+
+class TestCatGender:
+    """Keep API gender codes aligned with the CATLINK app's GenderUtils."""
+
+    @pytest.mark.parametrize(
+        ("gender", "expected"),
+        [(1, "Male"), (2, "Neutered male"), (3, "Female"), (4, "Neutered female")],
+    )
+    @pytest.mark.parametrize("as_string", [False, True])
+    def test_gender_label(
+        self, mock_coordinator, sample_cat_data, gender, expected, as_string
+    ) -> None:
+        """Decode all app gender choices from numeric and string API values."""
+        data = {**sample_cat_data, "gender": str(gender) if as_string else gender}
+        device = CatDevice(data, mock_coordinator)
+
+        assert device.gender_label == expected
+        assert device.cat_attrs()["gender"] == expected
 
 
 class TestDevice:
