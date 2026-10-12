@@ -5,6 +5,56 @@ from __future__ import annotations
 from typing import Any
 
 
+def _code(value: Any) -> int | None:
+    """Read integer API codes without treating booleans as event types."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def event_image_layout(record: dict[str, Any]) -> str:
+    """Follow the App's C07UltraDailyRecordAdapter event view selection."""
+    event_type = _code(record.get("type"))
+    if event_type in (0, 1, 2):
+        return "cleaning"
+    if event_type in (7, 99):
+        return "camera_views"
+    return "unknown"
+
+
+def event_image_role(record: dict[str, Any], slot: str) -> str:
+    """Describe reused pre/next slots according to the event's App view."""
+    layout = event_image_layout(record)
+    if slot == "before_image":
+        return {"cleaning": "before_cleaning", "camera_views": "exterior_camera"}.get(
+            layout, "image_1"
+        )
+    if slot == "after_image":
+        return {"cleaning": "after_cleaning", "camera_views": "interior_camera"}.get(
+            layout, "image_2"
+        )
+    return "on_site" if slot == "on_site_image" else "thumbnail"
+
+
+def event_image_visible(record: dict[str, Any], slot: str) -> bool:
+    """Honor the App's media flag even when an old picture URL is cached."""
+    if slot not in ("before_image", "after_image"):
+        return True
+    flag = _code(record.get("media_display_flag"))
+    if flag in (4, 5, 10):  # Expired media or both cameras closed.
+        return False
+    layout = event_image_layout(record)
+    if layout == "cleaning":
+        # Both cleaning pictures come from the interior (second) camera.
+        return flag not in (7, 8)
+    if layout == "camera_views":
+        # 6/9 close the exterior camera; 7/8 close the interior camera.
+        return flag not in ((6, 9) if slot == "before_image" else (7, 8))
+    return True
+
+
 def _image_url(value: Any) -> str | None:
     """Return a direct image URL from an API value."""
     if isinstance(value, dict):
@@ -26,7 +76,7 @@ def _image_id(value: Any) -> str | None:
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Normalize one C07 timeline record without guessing image semantics."""
+    """Normalize one C07 timeline record and its App-defined image semantics."""
     return {
         "event_id": record.get("id"),
         "event": record.get("event"),
@@ -48,6 +98,9 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
         "video_url": _image_url(record.get("videoUrl")),
         "move_detect_id": record.get("moveDetectId"),
         "media_display_flag": record.get("mediaDisplayFlag"),
+        "image_layout": event_image_layout(record),
+        "before_image_role": event_image_role(record, "before_image"),
+        "after_image_role": event_image_role(record, "after_image"),
     }
 
 

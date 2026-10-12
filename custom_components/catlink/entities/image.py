@@ -20,6 +20,9 @@ class CatlinkImageEntity(CatlinkEntity, ImageEntity):
     def update(self) -> None:
         """Update the current event image URL."""
         super().update()
+        image_name = self._option.get("image_name")
+        if callable(image_name):
+            self._attr_name = f"{self._device.name} {image_name()}".strip()
         image_url = self._device.event_image_url(self._name)
         if image_url != getattr(self, "_attr_image_url", None):
             self._attr_image_url = image_url

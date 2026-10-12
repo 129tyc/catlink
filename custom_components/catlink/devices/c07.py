@@ -14,7 +14,13 @@ from homeassistant.util import dt as dt_util
 from ..const import _LOGGER
 from ..helpers import format_api_error
 from ..models.additional_cfg import AdditionalDeviceConfig
-from ..models.c07_events import empty_event_data, normalize_records
+from ..models.c07_events import (
+    empty_event_data,
+    event_image_layout,
+    event_image_role,
+    event_image_visible,
+    normalize_records,
+)
 from .litter_device import LitterDevice
 
 if TYPE_CHECKING:
@@ -40,6 +46,23 @@ API_C07_WATERMARK_SWITCH = "token/cameraLitterbox/watermarkSwitch"
 API_C07_FILL_LIGHT_SETTING = "token/cameraLitterbox/fillLightSetting"
 API_C07_EVENT_TIMELINE = "token/litterbox/stats/log/timeline"
 API_C07_GET_PIC_URL = "token/cameraLitterbox/getPicUrl"
+
+_EVENT_IMAGE_SLOTS = {
+    "last_event_before": "before_image",
+    "last_event_after": "after_image",
+    "last_event_on_site": "on_site_image",
+    "last_event_thumbnail": "thumbnail",
+}
+_EVENT_IMAGE_NAMES = {
+    "before_cleaning": "Last event before cleaning",
+    "after_cleaning": "Last event after cleaning",
+    "exterior_camera": "Last event exterior camera",
+    "interior_camera": "Last event interior camera",
+    "image_1": "Last event image 1",
+    "image_2": "Last event image 2",
+    "on_site": "Last event on site",
+    "thumbnail": "Last event thumbnail",
+}
 
 _GARBAGE_FULL_ERROR = "GARBAGE_FULL_ABNORMAL"
 _GARBAGE_NEARLY_FULL_ERROR = "GARBAGE_TOBE_FULL_ABNORMAL"
@@ -527,14 +550,19 @@ class C07Device(LitterDevice):
             "last_event_before": {
                 "name": "Last event before",
                 "coordinator_attr": "event_coordinator",
+                "image_name": partial(self.event_image_name, "last_event_before"),
+                "state_attrs": partial(self.event_image_attrs, "last_event_before"),
             },
             "last_event_after": {
                 "name": "Last event after",
                 "coordinator_attr": "event_coordinator",
+                "image_name": partial(self.event_image_name, "last_event_after"),
+                "state_attrs": partial(self.event_image_attrs, "last_event_after"),
             },
             "last_event_on_site": {
                 "name": "Last event on site",
                 "coordinator_attr": "event_coordinator",
+                "state_attrs": partial(self.event_image_attrs, "last_event_on_site"),
             },
         }
 
@@ -768,15 +796,30 @@ class C07Device(LitterDevice):
         return dict(record)
 
     def event_image_url(self, role: str) -> str | None:
-        """Return one latest-event image URL by its stable role name."""
+        """Return an App-visible image URL while keeping entity IDs stable."""
         record = self.event_data.get("last_event") or {}
-        role_map = {
-            "last_event_before": "before_image",
-            "last_event_after": "after_image",
-            "last_event_on_site": "on_site_image",
-            "last_event_thumbnail": "thumbnail",
+        slot = _EVENT_IMAGE_SLOTS.get(role, "")
+        return record.get(slot) if event_image_visible(record, slot) else None
+
+    def event_image_name(self, role: str) -> str:
+        """Return the image label used for the latest event's actual meaning."""
+        record = self.event_data.get("last_event") or {}
+        return _EVENT_IMAGE_NAMES[
+            event_image_role(record, _EVENT_IMAGE_SLOTS.get(role, ""))
+        ]
+
+    def event_image_attrs(self, role: str) -> dict[str, Any]:
+        """Expose image semantics without putting signed URLs in attributes."""
+        record = self.event_data.get("last_event") or {}
+        image_role = event_image_role(record, _EVENT_IMAGE_SLOTS.get(role, ""))
+        return {
+            "event_id": record.get("event_id"),
+            "event_type": record.get("type"),
+            "image_layout": event_image_layout(record),
+            "image_role": image_role,
+            "image_label": _EVENT_IMAGE_NAMES[image_role],
+            "media_display_flag": record.get("media_display_flag"),
         }
-        return record.get(role_map.get(role, ""))
 
     def error_attrs(self) -> dict:
         """Return C07 error attributes."""
@@ -909,7 +952,11 @@ class C07Device(LitterDevice):
             ("after_image", "after_image_id"),
             ("on_site_image", "on_site_image_id"),
         ):
-            if record.get(url_key) or not record.get(id_key):
+            if (
+                not event_image_visible(record, url_key)
+                or record.get(url_key)
+                or not record.get(id_key)
+            ):
                 continue
             try:
                 response = await self.account.request(
