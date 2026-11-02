@@ -54,7 +54,7 @@ async def test_f05_discovery_and_feedback(device):
     assert device.food_remaining == "Sufficient"
     assert device.food_out_portions == 3
     assert device.camera is True
-    assert device.child_lock is False
+    assert device.key_lock is False
     assert device.hass_select == {}
     assert "weight" not in device.hass_sensor
     assert "last_log" not in device.hass_sensor
@@ -81,6 +81,30 @@ async def test_missing_feedback_stays_unknown(device):
     assert device.online is None
     assert device.food_remaining is None
     assert device.food_out_portions is None
+    assert device.error is None
+
+
+@pytest.mark.parametrize(("detail", "expected"), [
+    ({"deviceErrorList": [], "currentErrorMessage": None}, "Normal Operation"),
+    ({"deviceErrorList": [], "currentErrorMessage": ""}, "Normal Operation"),
+    ({"deviceErrorList": [], "currentErrorMessage": "Food jammed"}, "Food jammed"),
+    ({"deviceErrorList": [{"errkey": "FOOD_JAM"}]}, "Device error"),
+    ({"deviceErrorList": [{"errkey": "FOOD_JAM"}], "currentErrorMessage": "Food jammed"}, "Food jammed"),
+    ({"workStatus": "00"}, None),
+    ({"deviceErrorList": None}, None),
+])
+def test_error_state_requires_explicit_feedback(device, detail, expected):
+    """Distinguish confirmed normal feedback, an active error and missing data."""
+    device.detail = detail
+    assert device.error == expected
+
+
+async def test_action_error_takes_precedence_until_successful_refresh(device):
+    await device.async_init()
+    device._set_action_error("Command rejected")
+    assert device.error == "Command rejected"
+    await device.update_device_detail()
+    assert device.error == "Normal Operation"
 
 
 async def test_manual_feed_uses_selected_portions_and_f05_contract(device):
@@ -105,7 +129,7 @@ async def test_failed_feed_is_reported_without_retry(device, response):
 @pytest.mark.parametrize(("name", "endpoint", "parameter"), [
     ("camera", "cameraSwitch", "cameraSwitch"),
     ("microphone", "micSwitch", "switchFlag"),
-    ("child_lock", "keyLock/setting", "switchFlag"),
+    ("key_lock", "keyLock/setting", "switchFlag"),
     ("auto_refill", "autoSwitch", "switchFlag"),
 ])
 @pytest.mark.parametrize("on", [True, False])
@@ -143,6 +167,16 @@ async def test_f05_entities_and_number_service(hass, device):
         await hass.data[domain].async_add_entities(created)
         entities.update({(domain, entity._name): entity for entity in created})
     await hass.async_block_till_done()
+
+    online = entities["binary_sensor", "online"]
+    assert online.device_class == "connectivity"
+    assert hass.states.get(online.entity_id).state == "on"
+    assert hass.states.get(entities["switch", "key_lock"].entity_id).state == "off"
+    assert ("switch", "child_lock") not in entities
+    error = hass.states.get(entities["sensor", "error"].entity_id)
+    assert error.state == "Normal Operation"
+    assert error.attributes["errors"] == []
+    assert "device_errors" not in error.attributes
 
     number = entities["number", "portions"]
     assert hass.states.get(number.entity_id).state == "1"

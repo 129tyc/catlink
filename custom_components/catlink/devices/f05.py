@@ -43,7 +43,16 @@ class F05Device(Device):
 
     @property
     def error(self) -> str | None:
-        return self._action_error or self.detail.get("currentErrorMessage")
+        if self._action_error:
+            return self._action_error
+        if message := self.detail.get("currentErrorMessage"):
+            return message
+        errors = self.detail.get("deviceErrorList")
+        if errors:
+            return "Device error"
+        if errors == []:
+            return "Normal Operation"
+        return None
 
     @property
     def camera(self) -> bool | None:
@@ -54,7 +63,7 @@ class F05Device(Device):
         return self.detail.get("micSwitch")
 
     @property
-    def child_lock(self) -> bool | None:
+    def key_lock(self) -> bool | None:
         return self.detail.get("childLock")
 
     @property
@@ -72,7 +81,7 @@ class F05Device(Device):
     def error_attrs(self) -> dict:
         return {
             "current_error_type": self.detail.get("currentErrorType"),
-            "device_errors": self.detail.get("deviceErrorList"),
+            "errors": self.detail.get("deviceErrorList"),
         }
 
     async def update_device_detail(self) -> dict:
@@ -148,7 +157,7 @@ class F05Device(Device):
             for name, label, icon, endpoint, parameter in (
                 ("camera", "Camera", "mdi:camera", "cameraSwitch", "cameraSwitch"),
                 ("microphone", "Microphone", "mdi:microphone", "micSwitch", "switchFlag"),
-                ("child_lock", "Child lock", "mdi:lock", "keyLock/setting", "switchFlag"),
+                ("key_lock", "Child lock", "mdi:lock", "keyLock/setting", "switchFlag"),
                 ("auto_refill", "Auto refill", "mdi:autorenew", "autoSwitch", "switchFlag"),
             )
         }
