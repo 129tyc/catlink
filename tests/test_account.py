@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from homeassistant.const import CONF_DEVICES, CONF_PASSWORD, CONF_TOKEN
+from homeassistant.const import CONF_PASSWORD, CONF_TOKEN
 
 from custom_components.catlink.const import (
     CONF_API_BASE,
@@ -325,16 +325,34 @@ class TestAccountGetDevices:
         with patch.object(account, "request", new_callable=AsyncMock) as mock_request:
             mock_request.return_value = {
                 "returnCode": 0,
-                "data": {
-                    CONF_DEVICES: [
-                        {"id": "dev1", "deviceName": "Litter Box"},
-                    ]
-                },
+                "data": [
+                    {"id": "dev1", "deviceName": "Litter Box"},
+                    {"id": "f05-test", "deviceType": "VISUAL_F05"},
+                ],
             }
             devices = await account.get_devices()
 
-            assert devices == [{"id": "dev1", "deviceName": "Litter Box"}]
-            mock_request.assert_called_once()
+            assert devices == [
+                {"id": "dev1", "deviceName": "Litter Box"},
+                {"id": "f05-test", "deviceType": "VISUAL_F05"},
+            ]
+            mock_request.assert_awaited_once_with("token/device/union/sortedListV2")
+
+    async def test_get_devices_retries_v2_after_expired_session(self, account) -> None:
+        """Retain the existing reauthentication path with the new response shape."""
+        account.request = AsyncMock(side_effect=[
+            {"returnCode": 1002},
+            {"returnCode": 0, "data": [{"id": "f05-test"}]},
+        ])
+        account.async_login = AsyncMock(return_value=True)
+
+        assert await account.get_devices() == [{"id": "f05-test"}]
+        account.async_login.assert_awaited_once()
+        assert account.request.await_count == 2
+
+    async def test_get_devices_empty_catalog(self, account) -> None:
+        account.request = AsyncMock(return_value={"returnCode": 0, "data": []})
+        assert await account.get_devices() == []
 
     @pytest.mark.usefixtures("enable_custom_integrations")
     async def test_get_devices_login_when_no_token(

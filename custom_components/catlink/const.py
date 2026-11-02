@@ -29,7 +29,7 @@ DEFAULT_API_BASE = "https://app.catlinks.cn/api/"
 
 # Device types with full support (sensors, switches, selects, etc.)
 SUPPORTED_DEVICE_TYPES = frozenset(
-    {"C08", "VISUAL_C07", "SCOOPER", "LITTER_BOX_599", "FEEDER", "PUREPRO"}
+    {"C08", "VISUAL_C07", "SCOOPER", "LITTER_BOX_599", "FEEDER", "VISUAL_F05", "PUREPRO"}
 )
 
 # API server regions: value is the API base URL

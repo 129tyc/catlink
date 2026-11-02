@@ -11,7 +11,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from homeassistant.const import CONF_DEVICES, CONF_PASSWORD, CONF_TOKEN
+from homeassistant.const import CONF_PASSWORD, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.storage import Store
@@ -194,13 +194,13 @@ class Account:
         if not self.token:
             if not await self.async_login():
                 return []
-        api = "token/device/union/list/sorted"
-        rsp = await self.request(api, {"type": "NONE"})
+        api = "token/device/union/sortedListV2"
+        rsp = await self.request(api)
         eno = rsp.get("returnCode", 0)
         if eno == 1002:  # Illegal token
             if await self.async_login():
-                rsp = await self.request(api, {"type": "NONE"})
-        dls = rsp.get("data", {}).get(CONF_DEVICES) or []
+                rsp = await self.request(api)
+        dls = rsp.get("data") or []
         if not dls:
             _LOGGER.warning("Got devices for %s failed: %s", self.phone, rsp)
         return dls

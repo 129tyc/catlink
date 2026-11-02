@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add 饭兜 / VISUAL_F05 feedback, manual feeding and configuration switches.
+- Discover devices through the App's V2 list, which includes VISUAL_F05.
+
 ## 2.1.1 - 2026-02-06
 
 ### Added
