@@ -31,11 +31,21 @@ def feedback():
 
 
 @pytest.fixture
-def device(feedback):
+def device(hass, feedback):
     coordinator = MagicMock()
+    coordinator.hass = hass
+    coordinator.config_entry = None
+    coordinator.account.hass = hass
     coordinator.account.request = AsyncMock(
         return_value={"returnCode": 0, "data": {"deviceInfo": feedback}}
     )
+
+    async def request(api, *args):
+        if api == "token/device/feederpro/stats/timeline":
+            return {"returnCode": 0, "data": {"feederLogs": {"total": "0", "rows": []}}}
+        return coordinator.account.request.return_value
+
+    coordinator.account.request.side_effect = request
     return create_device({
         "id": "f05-test", "mac": "AA:BB:CC:DD:EE:05", "model": "00",
         "deviceName": "Test feeder", "deviceType": "VISUAL_F05",
@@ -46,7 +56,7 @@ async def test_f05_discovery_and_feedback(device):
     assert isinstance(device, F05Device)
     assert "VISUAL_F05" in SUPPORTED_DEVICE_TYPES
     await device.async_init()
-    device.account.request.assert_awaited_once_with(
+    device.account.request.assert_any_await(
         "token/cameraFeeder/detail", {"deviceId": "f05-test"}
     )
     assert device.state == "idle"
@@ -55,7 +65,7 @@ async def test_f05_discovery_and_feedback(device):
     assert device.food_out_portions == 3
     assert device.camera is True
     assert device.key_lock is False
-    assert device.hass_select == {}
+    assert set(device.hass_select) == {"refill_interval"}
     assert "weight" not in device.hass_sensor
     assert "last_log" not in device.hass_sensor
     assert "temperature" not in device.state_attrs()
@@ -131,6 +141,9 @@ async def test_failed_feed_is_reported_without_retry(device, response):
     ("microphone", "micSwitch", "switchFlag"),
     ("key_lock", "keyLock/setting", "switchFlag"),
     ("auto_refill", "autoSwitch", "switchFlag"),
+    ("timed_feeding", "timerSwitch", "switchFlag"),
+    ("face_feeding", "faceModeSwitch", "switchFlag"),
+    ("food_balance_control", "balanceLimitSwitch", "enable"),
 ])
 @pytest.mark.parametrize("on", [True, False])
 async def test_switch_contract_and_feedback(device, name, endpoint, parameter, on):
@@ -191,3 +204,82 @@ async def test_f05_entities_and_number_service(hass, device):
     device.account.request.return_value = {"returnCode": 0, "data": {"deviceInfo": {"cameraSwitch": False}}}
     await device.update_device_detail()
     assert hass.states.get(camera.entity_id).state == "off"
+
+
+@pytest.mark.parametrize(("name", "endpoint", "value", "field"), [
+    ("refill_portions", "refillSetting", 5, "refillCopies"),
+    ("daily_refill_limit", "dailyRefillSetting", 20, "dailyRefillCopies"),
+])
+async def test_persistent_numbers_use_api_and_feedback(device, feedback, name, endpoint, value, field):
+    feedback[field] = 3
+    await device.hass_number[name]["async_set"](value)
+    device.account.request.assert_any_await(
+        f"token/cameraFeeder/{endpoint}", {"deviceId": "f05-test", "copies": str(value)}, "POST"
+    )
+    assert getattr(device, name) == 3
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("refill_portions", 0), ("refill_portions", 6), ("refill_portions", 2.5),
+    ("daily_refill_limit", 201),
+])
+async def test_number_bounds_match_app(device, name, value):
+    with pytest.raises(HomeAssistantError):
+        await device.async_set_number(name, value)
+    device.account.request.assert_not_awaited()
+
+
+async def test_interval_updates_preserve_other_setting_under_concurrency(device):
+    import asyncio
+    backend = {"refillDelay": 30, "refillDelaySwitch": False}
+
+    async def request(api, params, method="GET"):
+        if method == "GET":
+            snapshot = dict(backend)
+            await asyncio.sleep(0)
+            return {"returnCode": 0, "data": {"deviceInfo": snapshot}}
+        assert api == "token/cameraFeeder/foodoutTimeInterval"
+        backend.update(refillDelay=int(params["timeInterval"]), refillDelaySwitch=params["switchFlag"] == "true")
+        return {"returnCode": 0}
+
+    device.account.request.side_effect = request
+    await asyncio.gather(
+        device.async_set_refill_interval("120 min"),
+        device.async_set_refill_interval(enabled=True),
+    )
+    assert backend == {"refillDelay": 120, "refillDelaySwitch": True}
+    assert device.refill_interval == "120 min"
+
+
+async def test_interval_refuses_unknown_companion_feedback(device):
+    with pytest.raises(HomeAssistantError, match="Unable to read"):
+        await device.async_set_refill_interval("60 min")
+    assert all(c.args[0] == "token/cameraFeeder/detail" for c in device.account.request.await_args_list)
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_config_numbers_and_interval_through_ha(hass, device, feedback):
+    from custom_components.catlink.entities.select import CatlinkSelectEntity
+    feedback.update(refillCopies=3, dailyRefillCopies=20, refillDelay=30, refillDelaySwitch=False)
+    await device.async_init()
+    coordinator = DataUpdateCoordinator(hass, logging.getLogger(__name__), name="f05-config", config_entry=None)
+    coordinator.account = device.account
+    coordinator.async_set_updated_data({})
+    device.coordinator = coordinator
+    number = CatlinkNumberEntity("refill_portions", device, device.hass_number["refill_portions"])
+    select = CatlinkSelectEntity("refill_interval", device, device.hass_select["refill_interval"])
+    await async_setup_component(hass, "number", {})
+    await async_setup_component(hass, "select", {})
+    await hass.data["number"].async_add_entities([number])
+    await hass.data["select"].async_add_entities([select])
+    await hass.async_block_till_done()
+    assert hass.states.get(number.entity_id).state == "3"
+    assert hass.states.get(select.entity_id).state == "30 min"
+    await hass.services.async_call("number", "set_value", {"entity_id": number.entity_id, "value": 5}, blocking=True)
+    assert hass.states.get(number.entity_id).state == "3"
+    await hass.services.async_call("select", "select_option", {"entity_id": select.entity_id, "option": "120 min"}, blocking=True)
+    assert hass.states.get(select.entity_id).state == "30 min"
+    feedback.update(refillCopies=5, refillDelay=120)
+    await device.update_device_detail()
+    assert hass.states.get(number.entity_id).state == "5"
+    assert hass.states.get(select.entity_id).state == "120 min"
