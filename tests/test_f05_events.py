@@ -28,7 +28,8 @@ def row(kind="EAT", flag=2, event_id="event-test"):
     return {"id": event_id, "type": kind, "subEvent": "EAT" if kind == "EAT" else "R_AUTO",
             "event": "Eating" if kind == "EAT" else "Food dispensed", "time": "12:30:00",
             "createTime": 1770118200000, "mediaDisplayFlag": flag,
-            "firstSection": "5 g", "secondSection": "2 min",
+            "firstSection": "60s" if kind == "EAT" else "2",
+            "secondSection": "0g" if kind == "EAT" else "Bowl full",
             "picId0": "synthetic-zero", "picId1": "synthetic-one", "picId2": "synthetic-two"}
 
 
@@ -40,8 +41,10 @@ def test_normalization_preserves_f05_fields_and_type_scoped_ids():
     rows = normalize_records([row(), row(), row("FOOD_OUT")])
     assert len(rows) == 2
     assert rows[0]["event_start"] == 1770118200000
-    assert rows[0]["first_section"] == "5 g"
+    assert rows[0]["first_section"] == "60s"
+    assert "second_section" not in rows[0]
     assert rows[1]["sub_event"] == "R_AUTO"
+    assert rows[1]["second_section"] == "Bowl full"
     assert "before_image" not in rows[0]
 
 
@@ -71,6 +74,8 @@ async def test_events_use_feeder_timeline_and_batch_picture_api(device, monkeypa
     assert first.args == ("token/device/feederpro/stats/timeline", {"deviceId": "test-f05", "date": "2026-02-03", "type": 0, "pageNumber": 1, "pageSize": 10})
     assert second.args == ("token/media/ezviz/list/pics", {"picIds": "synthetic-zero,synthetic-one,synthetic-two"})
     assert device.last_event == "Eating"
+    assert device.last_event_attrs()["first_section"] == "60s"
+    assert "second_section" not in device.last_event_attrs()
     assert device.event_image_url("last_event_image_0").endswith("signature=synthetic")
     assert "signature" not in str(device.last_event_attrs())
     assert "signature" not in str(device.event_image_attrs(0))
@@ -124,6 +129,7 @@ async def test_real_event_entities_follow_refresh_and_clear_images(hass, device)
     await hass.data["image"].async_add_entities([image])
     await hass.async_block_till_done()
     assert hass.states.get(sensor.entity_id).state == "Eating"
+    assert "second_section" not in hass.states.get(sensor.entity_id).attributes
     assert image.available
     assert image.image_last_updated == dt_util.utc_from_timestamp(records[0]["event_start"] / 1000)
     device.event_data = {"last_event": None, "records": []}

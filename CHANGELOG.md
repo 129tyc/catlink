@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Omit the unused weight placeholder from F05 eating events; preserve eating duration.
 - Add F05 timed/face feeding, refill limits and interval configuration.
 - Add today's F05 event timeline and three event image entities with media visibility handling.
 - Add 饭兜 / VISUAL_F05 feedback, manual feeding and configuration switches.

@@ -10,7 +10,7 @@ def normalize_records(rows: list[dict]) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        records.append({
+        record = {
             "event_id": row.get("id"),
             "event": row.get("event"),
             "type": row.get("type"),
@@ -18,14 +18,17 @@ def normalize_records(rows: list[dict]) -> list[dict]:
             "time": row.get("time"),
             "event_start": row.get("createTime"),
             "first_section": row.get("firstSection"),
-            "second_section": row.get("secondSection"),
             "pet_id": row.get("petId"),
             "pet_name": row.get("petName"),
             "video_start": row.get("startVideoTime"),
             "video_end": row.get("endVideoTime"),
             "media_display_flag": row.get("mediaDisplayFlag"),
             **{f"image_{slot}_id": row.get(f"picId{slot}") for slot in range(3)},
-        })
+        }
+        # F05 eating events report duration, not measured food intake.
+        if row.get("subEvent") != "EAT":
+            record["second_section"] = row.get("secondSection")
+        records.append(record)
     return records
 
 
