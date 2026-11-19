@@ -11,6 +11,7 @@ from custom_components.catlink.devices.registry import DEVICE_TYPES
 from custom_components.catlink.entities.button import CatlinkButtonEntity
 from custom_components.catlink.entities.binary import CatlinkBinarySensorEntity
 from custom_components.catlink.entities.sensor import CatlinkSensorEntity
+from custom_components.catlink.entities.select import CatlinkSelectEntity
 from custom_components.catlink.entities.switch import CatlinkSwitchEntity
 from homeassistant.components.binary_sensor import (
     DATA_COMPONENT as BINARY_SENSOR_COMPONENT,
@@ -100,6 +101,7 @@ def test_c07_state_and_garbage_fields(mock_coordinator, sample_c07_data) -> None
     )
     assert "action" not in device.hass_select
     assert "box_full_sensitivity" in device.hass_select
+    assert "sandbox_sensitivity" in device.hass_select
     assert "camera_switch_control" not in device.hass_select
     assert {"interior_camera", "exterior_camera"} <= device.hass_switch.keys()
     assert "pave_level_control" in device.hass_select
@@ -1272,3 +1274,161 @@ async def test_c07_box_full_sensitivity_uses_c07_endpoint(
         {"deviceId": "c07-device-id", "level": "2"},
         "POST",
     )
+
+
+@pytest.mark.parametrize(("level", "expected"), [(1, "Level 1"), ("2", "Level 2"), (3, "Level 3"), (None, None), (0, None), (4, None)])
+def test_c07_sandbox_sensitivity_uses_accessory_feedback(
+    mock_coordinator, sample_c07_data, level, expected
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"sandBoxInstall": True, "boxFullSensitivity": 2}
+    device._sand_settings = {"install": True, "workModel": 0, "level": level}
+    assert device.sandbox_sensitivity == expected
+    assert device.box_full_sensitivity == "Level 2"
+    assert device.sandbox_sensitivity_attrs() == {"raw_level": level, "raw_work_model": 0}
+    assert device.hass_select["sandbox_sensitivity"]["options"] == ["Level 1", "Level 2", "Level 3"]
+    device.detail["sandBoxInstall"] = False
+    assert device.sandbox_sensitivity is None
+
+
+@pytest.mark.asyncio
+async def test_c07_detail_refresh_reads_sandbox_settings(mock_coordinator, sample_c07_data):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    detail = {"online": True, "sandBoxInstall": True}
+    mock_coordinator.account.request = AsyncMock(side_effect=[
+        {"returnCode": 0, "data": {"deviceInfo": detail}},
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": 0, "level": 3}}},
+    ])
+    assert await device.update_device_detail() == detail
+    assert device.sandbox_sensitivity == "Level 3"
+    assert [c.args for c in mock_coordinator.account.request.await_args_list] == [
+        ("token/cameraLitterbox/info", {"deviceId": "c07-device-id"}),
+        ("token/cameraLitterbox/sandSysInfo", {"deviceId": "c07-device-id"}),
+    ]
+
+    mock_coordinator.account.request.reset_mock()
+    mock_coordinator.account.request.side_effect = None
+    mock_coordinator.account.request.return_value = {"data": {"deviceInfo": {"sandBoxInstall": False}}}
+    await device.update_device_detail()
+    assert device.sandbox_sensitivity is None
+    assert device._sand_settings == {}
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/info", {"deviceId": "c07-device-id"}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [0, 1])
+async def test_c07_sandbox_sensitivity_preserves_fresh_mode_and_uses_readback(
+    mock_coordinator, sample_c07_data, model
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"sandBoxInstall": True}
+    device._sand_settings = {"install": True, "workModel": 1 - model, "level": 1}
+    mock_coordinator.account.request = AsyncMock(side_effect=[
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": model, "level": 1}}},
+        {"returnCode": 0},
+        {"returnCode": 0, "data": {"deviceInfo": {"sandBoxInstall": True}}},
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": model, "level": 2}}},
+    ])
+    assert await device.select_sandbox_sensitivity("Level 3") is True
+    assert device.sandbox_sensitivity == "Level 2"
+    assert device.add_sand_copies == 1
+    assert [c.args for c in mock_coordinator.account.request.await_args_list] == [
+        ("token/cameraLitterbox/sandSysInfo", {"deviceId": "c07-device-id"}),
+        ("token/cameraLitterbox/sanboxSet", {"deviceId": "c07-device-id", "model": str(model), "level": "3"}, "POST"),
+        ("token/cameraLitterbox/info", {"deviceId": "c07-device-id"}),
+        ("token/cameraLitterbox/sandSysInfo", {"deviceId": "c07-device-id"}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    {}, {"returnCode": 1003}, {"returnCode": 0, "data": None},
+    {"returnCode": 0, "data": {"info": {"install": False, "workModel": 0}}},
+    {"returnCode": 0, "data": {"info": {"install": True}}},
+    {"returnCode": 0, "data": {"info": {"install": True, "workModel": 7}}},
+])
+async def test_c07_sandbox_sensitivity_requires_known_refill_mode(
+    mock_coordinator, sample_c07_data, response
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device._sand_settings = {"install": True, "workModel": 0, "level": 1}
+    mock_coordinator.account.request = AsyncMock(return_value=response)
+    with pytest.raises(HomeAssistantError, match="sand refill settings"):
+        await device.select_sandbox_sensitivity("Level 3")
+    mock_coordinator.account.request.assert_awaited_once_with(
+        "token/cameraLitterbox/sandSysInfo", {"deviceId": "c07-device-id"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_c07_sandbox_read_failure_does_not_discard_device_detail(
+    mock_coordinator, sample_c07_data
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device._sand_settings = {"install": True, "workModel": 0, "level": 3}
+    mock_coordinator.account.request = AsyncMock(side_effect=[
+        {"data": {"deviceInfo": {"sandBoxInstall": True, "online": True, "cleanStatus": "00"}}},
+        {"returnCode": 1003},
+    ])
+    await device.update_device_detail()
+    assert device.online is True
+    assert device.clean_status == "Idle"
+    assert device.sandbox_sensitivity is None
+
+
+@pytest.mark.asyncio
+async def test_c07_sandbox_invalid_level_and_unchanged_level_skip_writes(
+    mock_coordinator, sample_c07_data
+):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    mock_coordinator.account.request = AsyncMock(return_value={
+        "returnCode": 0, "data": {"info": {"install": True, "workModel": 0, "level": 3}}
+    })
+    assert await device.select_sandbox_sensitivity("Level 4") is False
+    mock_coordinator.account.request.assert_not_awaited()
+    assert await device.select_sandbox_sensitivity("Level 3") is True
+    assert mock_coordinator.account.request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_c07_sandbox_write_failure_keeps_feedback(mock_coordinator, sample_c07_data):
+    device = C07Device(sample_c07_data, mock_coordinator)
+    device.detail = {"sandBoxInstall": True}
+    mock_coordinator.account.request = AsyncMock(side_effect=[
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": 0, "level": 1}}},
+        {"returnCode": 4001, "msg": "not allowed"},
+    ])
+    assert await device.select_sandbox_sensitivity("Level 3") is False
+    assert device.sandbox_sensitivity == "Level 1"
+    assert device._action_error
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_c07_sandbox_select_entity_follows_feedback(hass, sample_c07_data):
+    coordinator = DataUpdateCoordinator(hass, logging.getLogger(__name__), name="c07-sand", config_entry=None)
+    coordinator.account = MagicMock()
+    device = C07Device(sample_c07_data, coordinator)
+    device.detail = {"sandBoxInstall": True}
+    device._sand_settings = {"install": True, "workModel": 0, "level": 1}
+    coordinator.async_set_updated_data({})
+    entity = CatlinkSelectEntity("sandbox_sensitivity", device, device.hass_select["sandbox_sensitivity"])
+    await async_setup_component(hass, "select", {})
+    await hass.data["select"].async_add_entities([entity])
+    await hass.async_block_till_done()
+    assert hass.states.get(entity.entity_id).state == "Level 1"
+
+    coordinator.account.request = AsyncMock(side_effect=[
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": 0, "level": 1}}},
+        {"returnCode": 0},
+        {"returnCode": 0, "data": {"deviceInfo": {"sandBoxInstall": True}}},
+        {"returnCode": 0, "data": {"info": {"install": True, "workModel": 0, "level": 2}}},
+    ])
+    await entity.async_select_option("Level 3")
+    assert hass.states.get(entity.entity_id).state == "Level 2"
+    assert hass.states.get(entity.entity_id).attributes["raw_work_model"] == 0
+
+    device._sand_settings = {}
+    coordinator.async_set_updated_data({})
+    assert hass.states.get(entity.entity_id).state == "unknown"

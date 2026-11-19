@@ -31,6 +31,8 @@ API_C07_INFO = "token/cameraLitterbox/info"
 API_C07_CAMERA_SWITCH = "token/cameraLitterbox/cameraSwitch"
 API_C07_ACTION_COMMAND_V2 = "token/cameraLitterbox/actionCmd/v2"
 API_C07_BOX_FULL_SENSITIVITY = "token/cameraLitterbox/boxfullSensitivity"
+API_C07_SAND_SYS_INFO = "token/cameraLitterbox/sandSysInfo"
+API_C07_SANDBOX_SET = "token/cameraLitterbox/sanboxSet"
 API_C07_AUTO_CLEAN = "token/cameraLitterbox/autoClean"
 API_C07_KITTY_MODEL_SWITCH = "token/cameraLitterbox/kittyModelSwitch"
 API_C07_KEY_LOCK = "token/cameraLitterbox/keyLock"
@@ -110,6 +112,7 @@ _LITTER_TYPE_LABELS = {
     3: "Cassava",
 }
 _PAVE_LEVEL_LABELS = {str(level): f"Level {level}" for level in range(4)}
+_SANDBOX_SENSITIVITY_LABELS = {str(level): f"Level {level}" for level in range(1, 4)}
 _SAFE_TIME_LABELS = {
     "1": "1 min",
     "3": "3 min",
@@ -141,6 +144,7 @@ class C07Device(LitterDevice):
         self._camera_lock = asyncio.Lock()
         self._camera_unconfirmed_target: str | None = None
         self._add_sand_copies = 1
+        self._sand_settings: dict = {}
         self.event_coordinator: DataUpdateCoordinator | None = None
         self.event_data = empty_event_data()
 
@@ -395,6 +399,20 @@ class C07Device(LitterDevice):
         return {
             "1": "Level 1",
             "2": "Level 2",
+        }
+
+    @property
+    def sandbox_sensitivity(self) -> str | None:
+        """Return automatic sand-refill sensitivity, not manual portions."""
+        if not self.sandbox_installed or not self._sand_settings.get("install"):
+            return None
+        return _SANDBOX_SENSITIVITY_LABELS.get(str(self._sand_settings.get("level")))
+
+    def sandbox_sensitivity_attrs(self) -> dict:
+        """Expose the refill system's raw sensitivity and mode feedback."""
+        return {
+            "raw_level": self._sand_settings.get("level"),
+            "raw_work_model": self._sand_settings.get("workModel"),
         }
 
     @property
@@ -687,6 +705,13 @@ class C07Device(LitterDevice):
                 "state_attrs": self.box_full_sensitivity_attrs,
                 "async_select": self.select_box_full_sensitivity,
             },
+            "sandbox_sensitivity": {
+                "name": "Automatic sand refill sensitivity",
+                "icon": "mdi:tune",
+                "options": list(_SANDBOX_SENSITIVITY_LABELS.values()),
+                "state_attrs": self.sandbox_sensitivity_attrs,
+                "async_select": self.select_sandbox_sensitivity,
+            },
             "pave_level_control": {
                 "icon": "mdi:tune",
                 "options": list(_PAVE_LEVEL_LABELS.values()),
@@ -886,8 +911,22 @@ class C07Device(LitterDevice):
         ):
             self._camera_unconfirmed_target = None
         self._action_error = None
+        if self.sandbox_installed:
+            await self.update_sand_settings()
+        else:
+            self._sand_settings = {}
         self._handle_listeners()
         return rdt
+
+    async def update_sand_settings(self) -> dict:
+        """Read the accessory's dedicated settings without replacing device detail."""
+        response = await self.account.request(API_C07_SAND_SYS_INFO, {"deviceId": self.id})
+        data = response.get("data") or {}
+        info = data.get("info") if isinstance(data, dict) else None
+        self._sand_settings = (
+            info if self._action_response_succeeded(response) and isinstance(info, dict) else {}
+        )
+        return self._sand_settings
 
     async def update_events(self) -> dict:
         """Refresh today's C07 events without affecting device availability."""
@@ -1052,6 +1091,27 @@ class C07Device(LitterDevice):
         return await self._handle_action_response(
             response, "Select C07 box-full sensitivity"
         )
+
+    async def select_sandbox_sensitivity(self, level: str, **kwargs) -> bool:
+        """Set refill sensitivity while preserving the current automatic/manual mode."""
+        level_code = next(
+            (code for code, label in _SANDBOX_SENSITIVITY_LABELS.items() if label == level),
+            None,
+        )
+        if level_code is None:
+            return False
+        settings = await self.update_sand_settings()
+        model = str(settings.get("workModel"))
+        if not settings.get("install") or model not in ("0", "1"):
+            raise HomeAssistantError("Unable to read C07 sand refill settings")
+        if str(settings.get("level")) == level_code:
+            return True
+        response = await self.account.request(
+            API_C07_SANDBOX_SET,
+            {"deviceId": self.id, "model": model, "level": level_code},
+            "POST",
+        )
+        return await self._handle_action_response(response, "Set C07 sand refill sensitivity")
 
     async def async_set_camera(self, bit: int, enable: bool, **kwargs) -> bool:
         """Change one camera without overwriting the other camera's setting."""

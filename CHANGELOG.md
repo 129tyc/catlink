@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add C07 automatic sand-refill sensitivity (levels 1–3), preserving the current refill mode.
 - Omit the unused weight placeholder from F05 eating events; preserve eating duration.
 - Add F05 timed/face feeding, refill limits and interval configuration.
 - Add today's F05 event timeline and three event image entities with media visibility handling.

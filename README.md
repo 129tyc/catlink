@@ -211,6 +211,12 @@ unconfirmed device feedback is rejected with a Home Assistant error. Commands
 are serialized per device. Add sand uses `add_sand_copies` only for a new task,
 not when resuming one.
 
+`sandbox_sensitivity` sets automatic sand-refill sensitivity (Level 1–3),
+matching the CATLINK App's refill-accessory setting. Higher sensitivity means
+more frequent automatic refills. It preserves the current manual/automatic
+refill mode. `add_sand_copies` is separate: it only selects 1–3 portions for the
+next manual Start adding sand action and does not change automatic refill sensitivity.
+
 The existing `clean_status` sensor is displayed as Operation status and reports
 actual device feedback. Cancellation remains Cancelling until the device
 reports idle; command acceptance alone does not mark an operation completed.
